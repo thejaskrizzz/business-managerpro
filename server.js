@@ -27,7 +27,6 @@ console.log('🔧 Cloudinary configured:', !!process.env.CLOUDINARY_CLOUD_NAME);
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://crm.royalservehotelsupplies.ae',
     'https://business-manager-pro.onrender.com',
     'https://royalbusinessappuae.vercel.app',
     process.env.FRONTEND_URL
@@ -45,15 +44,15 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/business-
   useNewUrlParser: true,
   useUnifiedTopology: true,
 })
-.then(() => {
-  console.log('✅ Connected to MongoDB');
-  console.log('Database URL:', process.env.MONGODB_URI ? 'Using environment MONGODB_URI' : 'Using local MongoDB');
-})
-.catch((error) => {
-  console.error('❌ MongoDB connection error:', error);
-  console.error('MongoDB URI:', process.env.MONGODB_URI || 'mongodb://localhost:27017/business-manager-pro');
-  process.exit(1);
-});
+  .then(() => {
+    console.log('✅ Connected to MongoDB');
+    console.log('Database URL:', process.env.MONGODB_URI ? 'Using environment MONGODB_URI' : 'Using local MongoDB');
+  })
+  .catch((error) => {
+    console.error('❌ MongoDB connection error:', error);
+    console.error('MongoDB URI:', process.env.MONGODB_URI || 'mongodb://localhost:27017/business-manager-pro');
+    process.exit(1);
+  });
 
 // Routes
 app.use('/api/auth', require('./routes/auth'));
@@ -69,11 +68,12 @@ app.use('/api/categories', require('./routes/categories'));
 app.use('/api/products', require('./routes/products'));
 app.use('/api/sales', require('./routes/sales'));
 app.use('/api/expenses', require('./routes/expenses'));
+app.use('/api/soa', require('./routes/soa'));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     message: 'Business Manager Pro API is running',
     timestamp: new Date().toISOString(),
     environment: {

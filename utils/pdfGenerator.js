@@ -27,186 +27,346 @@ const PDF_OPTIONS = {
   ]
 };
 
-  // Convert logo to base64 if it exists
-  const getLogoBase64 = async (logoUrl) => {
-    if (!logoUrl) return null;
-    
-    try {
-      // If it's already a data URL, extract the base64 part
-      if (logoUrl.startsWith('data:')) {
-        return logoUrl.split(',')[1]; // Extract base64 part
-      }
-      
-      // If it's a URL, fetch and convert to base64
-      if (logoUrl.startsWith('http://') || logoUrl.startsWith('https://')) {
-        const base64DataUrl = await fetchImageAsBase64(logoUrl);
-        return base64DataUrl.split(',')[1]; // Extract base64 part
-      }
-      
-      // If it's a local file path, read and convert to base64
-      if (fs.existsSync(logoUrl)) {
-        const buffer = fs.readFileSync(logoUrl);
-        return buffer.toString('base64');
-      }
-      
-      return null;
-    } catch (error) {
-      console.error('Error processing logo:', error);
-      return null;
+// Convert logo to base64 if it exists
+const getLogoBase64 = async (logoUrl) => {
+  if (!logoUrl) return null;
+
+  try {
+    // If it's already a data URL, extract the base64 part
+    if (logoUrl.startsWith('data:')) {
+      return logoUrl.split(',')[1]; // Extract base64 part
     }
+
+    // If it's a URL, fetch and convert to base64
+    if (logoUrl.startsWith('http://') || logoUrl.startsWith('https://')) {
+      const base64DataUrl = await fetchImageAsBase64(logoUrl);
+      return base64DataUrl.split(',')[1]; // Extract base64 part
+    }
+
+    // If it's a local file path, read and convert to base64
+    if (fs.existsSync(logoUrl)) {
+      const buffer = fs.readFileSync(logoUrl);
+      return buffer.toString('base64');
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error processing logo:', error);
+    return null;
+  }
+};
+
+// Fetch image and convert to base64
+const fetchImageAsBase64 = async (url) => {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+
+    client.get(url, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to fetch image: ${response.statusCode}`));
+        return;
+      }
+
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(chunk));
+      response.on('end', () => {
+        const buffer = Buffer.concat(chunks);
+        const base64 = buffer.toString('base64');
+        const contentType = response.headers['content-type'] || 'image/png';
+        resolve(`data:${contentType};base64,${base64}`);
+      });
+    }).on('error', (error) => {
+      reject(error);
+    });
+  });
+};
+
+// Ensure uploads directory exists
+const ensureUploadsDir = () => {
+  const uploadsDir = path.join(__dirname, '../uploads');
+  const pdfsDir = path.join(uploadsDir, 'pdfs');
+
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  if (!fs.existsSync(pdfsDir)) {
+    fs.mkdirSync(pdfsDir, { recursive: true });
+  }
+
+  return pdfsDir;
+};
+
+// Helper function to launch Puppeteer with fallback paths
+const launchPuppeteer = async () => {
+  try {
+    const browser = await puppeteer.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor'
+      ]
+    });
+    console.log('Successfully launched Puppeteer');
+    return browser;
+  } catch (error) {
+    console.error('Failed to launch Puppeteer:', error);
+    throw error;
+  }
+};
+
+// Generate PDF from quote data with optimized settings
+const generateQuotePDF = async (quote, company, customer) => {
+  let browser;
+  try {
+    // Get logo as base64 if available
+    const logoBase64 = company.logo ? await getLogoBase64(company.logo) : null;
+
+    // Generate HTML content with logo
+    const htmlContent = await generateQuoteHTML(quote, company, customer, logoBase64);
+
+    console.log('Starting PDF generation for quote:', quote.quoteNumber);
+
+    // Launch browser with optimized settings
+    browser = await launchPuppeteer();
+    const page = await browser.newPage();
+
+    // Set viewport and content with timeout
+    await page.setViewport({ width: 1200, height: 1600, deviceScaleFactor: 2 });
+    await page.setContent(htmlContent, {
+      waitUntil: 'networkidle0',
+      timeout: 30000 // 30 seconds to load the content
+    });
+
+    // Generate PDF with optimized settings
+    console.log('Generating PDF buffer...');
+    const pdfBuffer = await page.pdf({
+      ...PDF_OPTIONS,
+      displayHeaderFooter: false,
+      preferCSSPageSize: true
+    });
+
+    console.log(`PDF generated successfully, size: ${pdfBuffer.length} bytes`);
+
+    return {
+      buffer: pdfBuffer,
+      filename: `quote-${quote.quoteNumber}.pdf`,
+      isHtml: false
+    };
+  } catch (error) {
+    console.error('PDF generation error:', error);
+
+    // Fallback to HTML if PDF generation fails
+    console.log('Falling back to HTML generation');
+    const fallbackHtml = await generateQuoteHTML(quote, company, customer, null, true);
+
+    return {
+      buffer: Buffer.from(fallbackHtml),
+      filename: `quote-${quote.quoteNumber}.html`,
+      isHtml: true
+    };
+  } finally {
+    // Make sure to close the browser instance
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (err) {
+        console.error('Error closing browser:', err);
+      }
+    }
+  }
+};
+
+// Generate SOA PDF
+const generateSOAPDF = async (statementData, company, customer) => {
+  let browser;
+  try {
+    // Get logo as base64 if available
+    const logoBase64 = company.logo ? await getLogoBase64(company.logo) : null;
+
+    // Generate HTML content
+    const htmlContent = await generateSOAHTML(statementData, company, customer, logoBase64);
+
+    console.log('Starting PDF generation for SOA');
+
+    // Launch browser
+    browser = await launchPuppeteer();
+    const page = await browser.newPage();
+
+    // Set viewport
+    await page.setViewport({ width: 1200, height: 1600, deviceScaleFactor: 2 });
+    await page.setContent(htmlContent, {
+      waitUntil: 'networkidle0',
+      timeout: 30000
+    });
+
+    // Generate PDF
+    const pdfBuffer = await page.pdf({
+      ...PDF_OPTIONS,
+      displayHeaderFooter: true,
+      headerTemplate: '<div></div>',
+      footerTemplate: `
+          <div style="font-size: 8px; text-align: center; width: 100%; padding: 10px; color: #666;">
+            Page <span class="pageNumber"></span> of <span class="totalPages"></span>
+          </div>
+        `,
+      margin: { top: '20mm', right: '10mm', bottom: '20mm', left: '10mm' }
+    });
+
+    return {
+      buffer: pdfBuffer,
+      filename: `SOA-${customer.firstName}-${statementData.period.to}.pdf`,
+      isHtml: false
+    };
+  } catch (error) {
+    console.error('PDF generation error:', error);
+    // Fallback
+    const fallbackHtml = await generateSOAHTML(statementData, company, customer, null);
+    return {
+      buffer: Buffer.from(fallbackHtml),
+      filename: `SOA-${customer.firstName}.html`,
+      isHtml: true
+    };
+  } finally {
+    if (browser) await browser.close();
+  }
+};
+
+// Generate HTML for SOA
+const generateSOAHTML = async (data, company, customer, logoBase64) => {
+  const formatCurrency = (amount) => {
+    const currency = company.settings?.currency || 'AED';
+    const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
+    return new Intl.NumberFormat(locale, { style: 'currency', currency: currency }).format(amount);
   };
 
-  // Fetch image and convert to base64
-  const fetchImageAsBase64 = async (url) => {
-    return new Promise((resolve, reject) => {
-      const client = url.startsWith('https') ? https : http;
-      
-      client.get(url, (response) => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to fetch image: ${response.statusCode}`));
-          return;
-        }
-        
-        const chunks = [];
-        response.on('data', (chunk) => chunks.push(chunk));
-        response.on('end', () => {
-          const buffer = Buffer.concat(chunks);
-          const base64 = buffer.toString('base64');
-          const contentType = response.headers['content-type'] || 'image/png';
-          resolve(`data:${contentType};base64,${base64}`);
-        });
-      }).on('error', (error) => {
-        reject(error);
-      });
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleDateString('en-GB'); // DD/MM/YYYY
+  };
+
+  return `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <title>Statement of Account</title>
+        <style>
+          body { font-family: 'Inter', sans-serif; font-size: 10px; color: #1a1a1a; }
+          .container { padding: 20px; }
+          .header { display: flex; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid #1e40af; padding-bottom: 10px; }
+          .company-info h1 { margin: 0; font-size: 18px; color: #1e40af; }
+          .statement-title { text-align: right; }
+          .statement-title h2 { margin: 0; font-size: 20px; text-transform: uppercase; color: #1a1a1a; }
+          .info-grid { display: flex; justify-content: space-between; margin-bottom: 30px; gap: 20px; }
+          .box { background: #f8fafc; padding: 15px; border-radius: 4px; flex: 1; }
+          .box h3 { margin: 0 0 10px 0; font-size: 12px; color: #1e40af; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+          th { background: #1e40af; color: white; padding: 8px; text-align: left; font-size: 9px; }
+          td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px; }
+          .amount-col { text-align: right; }
+          .total-section { display: flex; justify-content: flex-end; }
+          .total-box { width: 200px; }
+          .total-row { display: flex; justify-content: space-between; padding: 8px; background: #1e40af; color: white; font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="company-info">
+              ${logoBase64 ? `<img src="data:image/png;base64,${logoBase64}" style="height: 40px; margin-bottom: 10px;">` : ''}
+              <h1>${company.name}</h1>
+              <p>${company.address?.street || ''}, ${company.address?.city || ''}</p>
+              <p>${company.email || ''} | ${company.phone || ''}</p>
+            </div>
+            <div class="statement-title">
+              <h2>Statement of Account</h2>
+              <p>Date: ${formatDate(new Date())}</p>
+            </div>
+          </div>
+
+          <div class="info-grid">
+            <div class="box">
+              <h3>Customer Details</h3>
+              <strong>${customer.firstName} ${customer.lastName}</strong><br>
+              ${customer.companyName ? customer.companyName + '<br>' : ''}
+              ${customer.address?.street || ''}<br>
+              ${customer.address?.city || ''}
+            </div>
+            <div class="box">
+              <h3>Statement Period</h3>
+              <p><strong>From:</strong> ${formatDate(data.period.from)}</p>
+              <p><strong>To:</strong> ${formatDate(data.period.to)}</p>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Invoice No</th>
+                <th>Description</th>
+                <th class="amount-col">Amount</th>
+                <th class="amount-col">Payment</th>
+                <th class="amount-col">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${data.invoices.map(inv => `
+                <tr>
+                  <td>${formatDate(inv.invoiceDate)}</td>
+                  <td>${inv.invoiceNumber}</td>
+                  <td>${inv.description}</td>
+                  <td class="amount-col">${formatCurrency(inv.amount)}</td>
+                  <td class="amount-col">${formatCurrency(inv.payment)}</td>
+                  <td class="amount-col">${formatCurrency(inv.runningBalance)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+
+          <div class="total-section">
+            <div class="total-box">
+              <div class="total-row">
+                <span>Total Outstanding Balance</span>
+                <span>${formatCurrency(data.totalBalance)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+};
+// Generate HTML content for the quote
+const generateQuoteHTML = async (quote, company, customer) => {
+  const formatCurrency = (amount) => {
+    const currency = company.settings?.currency || 'USD';
+    const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
+
+    return new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency: currency
+    }).format(amount);
+  };
+
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
     });
   };
 
-  // Ensure uploads directory exists
-  const ensureUploadsDir = () => {
-    const uploadsDir = path.join(__dirname, '../uploads');
-    const pdfsDir = path.join(uploadsDir, 'pdfs');
-    
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
-    if (!fs.existsSync(pdfsDir)) {
-      fs.mkdirSync(pdfsDir, { recursive: true });
-    }
-    
-    return pdfsDir;
-  };
+  const logoBase64 = await getLogoBase64(company.logo);
 
-  // Helper function to launch Puppeteer with fallback paths
-  const launchPuppeteer = async () => {
-    try {
-      const browser = await puppeteer.launch({
-        headless: true,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
-          '--disable-gpu',
-          '--disable-web-security',
-          '--disable-features=VizDisplayCompositor'
-        ]
-      });
-      console.log('Successfully launched Puppeteer');
-      return browser;
-    } catch (error) {
-      console.error('Failed to launch Puppeteer:', error);
-      throw error;
-    }
-  };
-
-  // Generate PDF from quote data with optimized settings
-  const generateQuotePDF = async (quote, company, customer) => {
-    let browser;
-    try {
-      // Get logo as base64 if available
-      const logoBase64 = company.logo ? await getLogoBase64(company.logo) : null;
-      
-      // Generate HTML content with logo
-      const htmlContent = await generateQuoteHTML(quote, company, customer, logoBase64);
-      
-      console.log('Starting PDF generation for quote:', quote.quoteNumber);
-      
-      // Launch browser with optimized settings
-      browser = await launchPuppeteer();
-      const page = await browser.newPage();
-      
-      // Set viewport and content with timeout
-      await page.setViewport({ width: 1200, height: 1600, deviceScaleFactor: 2 });
-      await page.setContent(htmlContent, {
-        waitUntil: 'networkidle0',
-        timeout: 30000 // 30 seconds to load the content
-      });
-      
-      // Generate PDF with optimized settings
-      console.log('Generating PDF buffer...');
-      const pdfBuffer = await page.pdf({
-        ...PDF_OPTIONS,
-        displayHeaderFooter: false,
-        preferCSSPageSize: true
-      });
-      
-      console.log(`PDF generated successfully, size: ${pdfBuffer.length} bytes`);
-      
-      return {
-        buffer: pdfBuffer,
-        filename: `quote-${quote.quoteNumber}.pdf`,
-        isHtml: false
-      };
-    } catch (error) {
-      console.error('PDF generation error:', error);
-      
-      // Fallback to HTML if PDF generation fails
-      console.log('Falling back to HTML generation');
-      const fallbackHtml = await generateQuoteHTML(quote, company, customer, null, true);
-      
-      return {
-        buffer: Buffer.from(fallbackHtml),
-        filename: `quote-${quote.quoteNumber}.html`,
-        isHtml: true
-      };
-    } finally {
-      // Make sure to close the browser instance
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (err) {
-          console.error('Error closing browser:', err);
-        }
-      }
-    }
-  };
-
-  // Generate HTML content for the quote
-  const generateQuoteHTML = async (quote, company, customer) => {
-    const formatCurrency = (amount) => {
-      const currency = company.settings?.currency || 'USD';
-      const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
-      
-      return new Intl.NumberFormat(locale, {
-        style: 'currency',
-        currency: currency
-      }).format(amount);
-    };
-
-    const formatDate = (dateString) => {
-      return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-    };
-
-    const logoBase64 = await getLogoBase64(company.logo);
-
-    return `
+  return `
       <!DOCTYPE html>
       <html lang="en">
       <head>
@@ -781,104 +941,104 @@ const PDF_OPTIONS = {
       </body>
       </html>
     `;
-  };
+};
 
-  // Generate Invoice PDF (similar to quote but for invoices)
-  const generateInvoicePDF = async (invoice, company, customer) => {
+// Generate Invoice PDF (similar to quote but for invoices)
+const generateInvoicePDF = async (invoice, company, customer) => {
+  try {
+    ensureUploadsDir();
+
+    // Get company logo as base64
+    const logoBase64 = await getLogoBase64(company.logo);
+    const htmlContent = generateInvoiceHTML(invoice, company, customer, logoBase64);
+
+    // Use html-pdf-node as primary PDF generation method
+    console.log('Generating invoice PDF using html-pdf-node');
+    const options = {
+      format: 'A4',
+      margin: {
+        top: '6mm',
+        right: '6mm',
+        bottom: '6mm',
+        left: '6mm'
+      },
+      printBackground: true,
+      displayHeaderFooter: false,
+      preferCSSPageSize: true
+    };
+
+    const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
+
+    console.log('Invoice PDF generated successfully using html-pdf-node');
+    return pdfBuffer;
+  } catch (error) {
+    console.error('Error generating invoice PDF:', error);
+
+    // Fallback: Try Puppeteer if html-pdf-node fails
     try {
-      ensureUploadsDir();
-      
-      // Get company logo as base64
+      console.log('Trying Puppeteer as fallback for invoice');
+      const browser = await launchPuppeteer();
+      const page = await browser.newPage();
+
       const logoBase64 = await getLogoBase64(company.logo);
       const htmlContent = generateInvoiceHTML(invoice, company, customer, logoBase64);
-      
-      // Use html-pdf-node as primary PDF generation method
-      console.log('Generating invoice PDF using html-pdf-node');
-      const options = {
+
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+
+      const pdfBuffer = await page.pdf({
         format: 'A4',
+        printBackground: true,
         margin: {
           top: '6mm',
           right: '6mm',
           bottom: '6mm',
           left: '6mm'
         },
-        printBackground: true,
-        displayHeaderFooter: false,
-        preferCSSPageSize: true
-      };
-      
-      const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
-      
-      console.log('Invoice PDF generated successfully using html-pdf-node');
+        preferCSSPageSize: true,
+        displayHeaderFooter: false
+      });
+
+      await browser.close();
+
+      console.log('Invoice PDF generated successfully using Puppeteer fallback');
       return pdfBuffer;
-    } catch (error) {
-      console.error('Error generating invoice PDF:', error);
-      
-      // Fallback: Try Puppeteer if html-pdf-node fails
-      try {
-        console.log('Trying Puppeteer as fallback for invoice');
-        const browser = await launchPuppeteer();
-        const page = await browser.newPage();
-        
-        const logoBase64 = await getLogoBase64(company.logo);
-        const htmlContent = generateInvoiceHTML(invoice, company, customer, logoBase64);
-        
-        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-        
-        const pdfBuffer = await page.pdf({
-          format: 'A4',
-          printBackground: true,
-          margin: {
-            top: '6mm',
-            right: '6mm',
-            bottom: '6mm',
-            left: '6mm'
-          },
-          preferCSSPageSize: true,
-          displayHeaderFooter: false
-        });
-        
-        await browser.close();
-        
-        console.log('Invoice PDF generated successfully using Puppeteer fallback');
-        return pdfBuffer;
-      } catch (puppeteerError) {
-        console.error('Puppeteer fallback also failed for invoice:', puppeteerError);
-        
-        // Ultimate fallback - return HTML content
-        console.log('Falling back to HTML response for invoice');
-        const logoBase64 = await getLogoBase64(company.logo);
-        const htmlContent = generateInvoiceHTML(invoice, company, customer, logoBase64);
-        
-        return {
-          buffer: Buffer.from(htmlContent, 'utf8'),
-          filename: `invoice-${invoice.invoiceNumber}-${Date.now()}.html`,
-          filepath: null,
-          isHtml: true
-        };
-      }
+    } catch (puppeteerError) {
+      console.error('Puppeteer fallback also failed for invoice:', puppeteerError);
+
+      // Ultimate fallback - return HTML content
+      console.log('Falling back to HTML response for invoice');
+      const logoBase64 = await getLogoBase64(company.logo);
+      const htmlContent = generateInvoiceHTML(invoice, company, customer, logoBase64);
+
+      return {
+        buffer: Buffer.from(htmlContent, 'utf8'),
+        filename: `invoice-${invoice.invoiceNumber}-${Date.now()}.html`,
+        filepath: null,
+        isHtml: true
+      };
     }
+  }
+};
+
+// Generate Invoice HTML (similar to quote but for invoices)
+const generateInvoiceHTML = (invoice, company, customer, logoBase64) => {
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
   };
 
-  // Generate Invoice HTML (similar to quote but for invoices)
-  const generateInvoiceHTML = (invoice, company, customer, logoBase64) => {
-    const formatDate = (dateString) => {
-      return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-    };
+  const formatCurrency = (amount, currency = 'USD') => {
+    const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
+    return new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency: currency,
+    }).format(amount);
+  };
 
-    const formatCurrency = (amount, currency = 'USD') => {
-      const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
-      return new Intl.NumberFormat(locale, {
-        style: 'currency',
-        currency: currency,
-      }).format(amount);
-    };
-
-    return `
+  return `
       <!DOCTYPE html>
       <html lang="en">
       <head>
@@ -1470,148 +1630,148 @@ const PDF_OPTIONS = {
       </body>
       </html>
     `;
-  };
+};
 
-  // Generate Purchase Order PDF
-  const generatePurchaseOrderPDF = async (purchaseOrder, company, vendor, client) => {
+// Generate Purchase Order PDF
+const generatePurchaseOrderPDF = async (purchaseOrder, company, vendor, client) => {
+  try {
+    ensureUploadsDir();
+
+    // Generate HTML content first
+    const htmlContent = await generatePurchaseOrderHTML(purchaseOrder, company, vendor, client);
+
+    // Use html-pdf-node as primary PDF generation method
+    console.log('Generating Purchase Order PDF using html-pdf-node');
+    console.log('HTML content length:', htmlContent.length);
+
+    const options = {
+      format: 'A4',
+      margin: {
+        top: '10mm',
+        right: '10mm',
+        bottom: '10mm',
+        left: '10mm'
+      },
+      printBackground: true,
+      displayHeaderFooter: false,
+      preferCSSPageSize: true,
+      timeout: 60000, // 60 second timeout
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-extensions',
+        '--disable-plugins',
+        '--disable-javascript' // Disable JS for faster generation
+      ]
+    };
+
+    console.log('PDF generation options:', options);
+    const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
+    console.log('PDF buffer generated, size:', pdfBuffer.length);
+
+    // Save PDF to file
+    const pdfsDir = ensureUploadsDir();
+    const filename = `purchase-order-${purchaseOrder.poNumber}-${Date.now()}.pdf`;
+    const filepath = path.join(pdfsDir, filename);
+
+    fs.writeFileSync(filepath, pdfBuffer);
+
+    console.log('Purchase Order PDF generated successfully using html-pdf-node');
+    return {
+      buffer: pdfBuffer,
+      filename,
+      filepath,
+      isHtml: false
+    };
+  } catch (error) {
+    console.error('Purchase Order PDF generation error:', error);
+    console.error('Error details:', {
+      message: error.message,
+      stack: error.stack,
+      name: error.name
+    });
+
+    // Fallback: Try Puppeteer if html-pdf-node fails
     try {
-      ensureUploadsDir();
-      
-      // Generate HTML content first
+      console.log('Trying Puppeteer as fallback for Purchase Order');
+      const browser = await launchPuppeteer();
+      const page = await browser.newPage();
+
       const htmlContent = await generatePurchaseOrderHTML(purchaseOrder, company, vendor, client);
-      
-      // Use html-pdf-node as primary PDF generation method
-      console.log('Generating Purchase Order PDF using html-pdf-node');
-      console.log('HTML content length:', htmlContent.length);
-      
-      const options = {
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+
+      const pdfBuffer = await page.pdf({
         format: 'A4',
+        printBackground: true,
         margin: {
           top: '10mm',
           right: '10mm',
           bottom: '10mm',
           left: '10mm'
         },
-        printBackground: true,
-        displayHeaderFooter: false,
         preferCSSPageSize: true,
-        timeout: 60000, // 60 second timeout
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--disable-web-security',
-          '--disable-features=VizDisplayCompositor',
-          '--disable-extensions',
-          '--disable-plugins',
-          '--disable-javascript' // Disable JS for faster generation
-        ]
-      };
-      
-      console.log('PDF generation options:', options);
-      const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
-      console.log('PDF buffer generated, size:', pdfBuffer.length);
-      
-      // Save PDF to file
+        displayHeaderFooter: false
+      });
+
+      await browser.close();
+
       const pdfsDir = ensureUploadsDir();
       const filename = `purchase-order-${purchaseOrder.poNumber}-${Date.now()}.pdf`;
       const filepath = path.join(pdfsDir, filename);
-      
+
       fs.writeFileSync(filepath, pdfBuffer);
-      
-      console.log('Purchase Order PDF generated successfully using html-pdf-node');
+
+      console.log('Purchase Order PDF generated successfully using Puppeteer fallback');
       return {
         buffer: pdfBuffer,
         filename,
         filepath,
         isHtml: false
       };
-    } catch (error) {
-      console.error('Purchase Order PDF generation error:', error);
-      console.error('Error details:', {
-        message: error.message,
-        stack: error.stack,
-        name: error.name
-      });
-      
-      // Fallback: Try Puppeteer if html-pdf-node fails
-      try {
-        console.log('Trying Puppeteer as fallback for Purchase Order');
-        const browser = await launchPuppeteer();
-        const page = await browser.newPage();
-        
-        const htmlContent = await generatePurchaseOrderHTML(purchaseOrder, company, vendor, client);
-        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-        
-        const pdfBuffer = await page.pdf({
-          format: 'A4',
-          printBackground: true,
-          margin: {
-            top: '10mm',
-            right: '10mm',
-            bottom: '10mm',
-            left: '10mm'
-          },
-          preferCSSPageSize: true,
-          displayHeaderFooter: false
-        });
-        
-        await browser.close();
-        
-        const pdfsDir = ensureUploadsDir();
-        const filename = `purchase-order-${purchaseOrder.poNumber}-${Date.now()}.pdf`;
-        const filepath = path.join(pdfsDir, filename);
-        
-        fs.writeFileSync(filepath, pdfBuffer);
-        
-        console.log('Purchase Order PDF generated successfully using Puppeteer fallback');
-        return {
-          buffer: pdfBuffer,
-          filename,
-          filepath,
-          isHtml: false
-        };
-      } catch (puppeteerError) {
-        console.error('Puppeteer fallback also failed for Purchase Order:', puppeteerError);
-        
-        // Ultimate fallback - return HTML content
-        console.log('Falling back to HTML response for Purchase Order');
-        const htmlContent = await generatePurchaseOrderHTML(purchaseOrder, company, vendor, client);
-        
-        return {
-          buffer: Buffer.from(htmlContent, 'utf8'),
-          filename: `purchase-order-${purchaseOrder.poNumber}-${Date.now()}.html`,
-          filepath: null,
-          isHtml: true
-        };
-      }
+    } catch (puppeteerError) {
+      console.error('Puppeteer fallback also failed for Purchase Order:', puppeteerError);
+
+      // Ultimate fallback - return HTML content
+      console.log('Falling back to HTML response for Purchase Order');
+      const htmlContent = await generatePurchaseOrderHTML(purchaseOrder, company, vendor, client);
+
+      return {
+        buffer: Buffer.from(htmlContent, 'utf8'),
+        filename: `purchase-order-${purchaseOrder.poNumber}-${Date.now()}.html`,
+        filepath: null,
+        isHtml: true
+      };
     }
+  }
+};
+
+// Generate HTML content for the purchase order
+const generatePurchaseOrderHTML = async (purchaseOrder, company, vendor, client) => {
+  const formatCurrency = (amount) => {
+    const currency = company.settings?.currency || 'USD';
+    const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
+
+    return new Intl.NumberFormat(locale, {
+      style: 'currency',
+      currency: currency
+    }).format(amount);
   };
 
-  // Generate HTML content for the purchase order
-  const generatePurchaseOrderHTML = async (purchaseOrder, company, vendor, client) => {
-    const formatCurrency = (amount) => {
-      const currency = company.settings?.currency || 'USD';
-      const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
-      
-      return new Intl.NumberFormat(locale, {
-        style: 'currency',
-        currency: currency
-      }).format(amount);
-    };
+  const formatDate = (dateString) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+  };
 
-    const formatDate = (dateString) => {
-      return new Date(dateString).toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-      });
-    };
+  const logoBase64 = await getLogoBase64(company.logo);
 
-    const logoBase64 = await getLogoBase64(company.logo);
-
-    return `
+  return `
       <!DOCTYPE html>
       <html lang="en">
       <head>
@@ -2194,26 +2354,27 @@ const PDF_OPTIONS = {
       </body>
       </html>
     `;
-  };
+};
 
-  module.exports = {
-    generateQuotePDF,
-    generateInvoicePDF,
-    generatePurchaseOrderPDF,
-    // New export for Delivery Order PDFs
-    generateDeliveryOrderPDF: async (sale, company, customer) => {
-      // Build a delivery order HTML and render to PDF (no prices, includes SI No., image, qty)
-      const formatDate = (dateString) => {
-        return new Date(dateString).toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        });
-      };
+module.exports = {
+  generateQuotePDF,
+  generateInvoicePDF,
+  generateSOAPDF,
+  generatePurchaseOrderPDF,
+  // New export for Delivery Order PDFs
+  generateDeliveryOrderPDF: async (sale, company, customer) => {
+    // Build a delivery order HTML and render to PDF (no prices, includes SI No., image, qty)
+    const formatDate = (dateString) => {
+      return new Date(dateString).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+    };
 
-      const logoBase64 = await getLogoBase64(company.logo);
+    const logoBase64 = await getLogoBase64(company.logo);
 
-      const htmlContent = `
+    const htmlContent = `
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -2301,11 +2462,11 @@ const PDF_OPTIONS = {
               </thead>
               <tbody>
                 ${sale.items.map((item, idx) => {
-                  const product = item.product || {};
-                  const img = (product.images && product.images.length > 0) ? product.images[0] : null;
-                  const safeDesc = (product.description || item.description || '').toString();
-                  const safeName = (product.name || item.productName || item.name || 'N/A').toString();
-                  return `
+      const product = item.product || {};
+      const img = (product.images && product.images.length > 0) ? product.images[0] : null;
+      const safeDesc = (product.description || item.description || '').toString();
+      const safeName = (product.name || item.productName || item.name || 'N/A').toString();
+      return `
                     <tr>
                       <td class="si-col">${idx + 1}</td>
                       <td><strong>${safeName}</strong>${product.sku ? `<div style="color:#6b7280; font-size:7px;">SKU: ${product.sku}</div>` : ''}</td>
@@ -2316,7 +2477,7 @@ const PDF_OPTIONS = {
                       <td style="text-align:right; font-weight:600;">${item.quantity}</td>
                     </tr>
                   `;
-                }).join('')}
+    }).join('')}
               </tbody>
             </table>
 
@@ -2351,43 +2512,43 @@ const PDF_OPTIONS = {
         </html>
       `;
 
-      try {
-        ensureUploadsDir();
-        const options = {
-          format: 'A4',
-          margin: { top: '8mm', right: '8mm', bottom: '8mm', left: '8mm' },
-          printBackground: true,
-          displayHeaderFooter: false,
-          preferCSSPageSize: true,
-          timeout: 60000,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--disable-web-security',
-            '--disable-features=VizDisplayCompositor',
-            '--disable-extensions',
-            '--disable-plugins',
-            '--disable-javascript'
-          ]
-        };
-        const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
-        return pdfBuffer;
-      } catch (error) {
-        // Fallback to Puppeteer
-        const browser = await launchPuppeteer();
-        const page = await browser.newPage();
-        await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-        const pdfBuffer = await page.pdf({
-          format: 'A4',
-          printBackground: true,
-          margin: { top: '8mm', right: '8mm', bottom: '8mm', left: '8mm' },
-          preferCSSPageSize: true,
-          displayHeaderFooter: false
-        });
-        await browser.close();
-        return pdfBuffer;
-      }
+    try {
+      ensureUploadsDir();
+      const options = {
+        format: 'A4',
+        margin: { top: '8mm', right: '8mm', bottom: '8mm', left: '8mm' },
+        printBackground: true,
+        displayHeaderFooter: false,
+        preferCSSPageSize: true,
+        timeout: 60000,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor',
+          '--disable-extensions',
+          '--disable-plugins',
+          '--disable-javascript'
+        ]
+      };
+      const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
+      return pdfBuffer;
+    } catch (error) {
+      // Fallback to Puppeteer
+      const browser = await launchPuppeteer();
+      const page = await browser.newPage();
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+      const pdfBuffer = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '8mm', right: '8mm', bottom: '8mm', left: '8mm' },
+        preferCSSPageSize: true,
+        displayHeaderFooter: false
+      });
+      await browser.close();
+      return pdfBuffer;
     }
-  };
+  }
+};

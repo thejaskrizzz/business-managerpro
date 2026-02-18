@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const Invoice = require('../models/Invoice');
+const Company = require('../models/Company');
+const Customer = require('../models/Customer');
 const auth = require('../middleware/auth');
+const { generateSOAPDF } = require('../utils/pdfGenerator');
 
 // @route   GET /api/soa
 // @desc    Get Statement of Account for a customer
@@ -121,13 +124,34 @@ router.get('/', auth, async (req, res) => {
             }
         }
 
-        res.json({
+        const statementData = {
             customer_id,
             period: { from, to },
             statementDate: new Date(),
             invoices: uniqueInvoices,
             totalBalance: finalRunningBalance
-        });
+        };
+
+        // Check for PDF format
+        if (req.query.format === 'pdf') {
+            // Fetch Company and Customer details for PDF
+            const company = await Company.findById(req.user.company._id);
+            const customer = await Customer.findById(customer_id);
+
+            const pdfResult = await generateSOAPDF(statementData, company, customer);
+
+            if (pdfResult.isHtml) {
+                res.setHeader('Content-Type', 'text/html');
+                res.setHeader('Content-Disposition', `attachment; filename="${pdfResult.filename}"`);
+                return res.send(pdfResult.buffer);
+            } else {
+                res.setHeader('Content-Type', 'application/pdf');
+                res.setHeader('Content-Disposition', `attachment; filename="${pdfResult.filename}"`);
+                return res.send(pdfResult.buffer);
+            }
+        }
+
+        res.json(statementData);
 
     } catch (err) {
         console.error('Error generating SOA:', err);
