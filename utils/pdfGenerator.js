@@ -331,7 +331,8 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                 <th>Date</th>
                 <th>Invoice No</th>
                 <th>Description</th>
-                <th class="amount-col">Amount</th>
+                <th class="amount-col">Amount (excl. tax)</th>
+                <th class="amount-col">Tax</th>
                 <th class="amount-col">Payment</th>
                 <th class="amount-col">Balance</th>
               </tr>
@@ -343,6 +344,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                   <td>${inv.invoiceNumber}</td>
                   <td>${inv.description}</td>
                   <td class="amount-col">${formatCurrency(inv.amount)}</td>
+                  <td class="amount-col">${formatCurrency(inv.taxAmount || 0)}</td>
                   <td class="amount-col">${formatCurrency(inv.payment)}</td>
                   <td class="amount-col">${formatCurrency(inv.runningBalance)}</td>
                 </tr>
@@ -351,10 +353,18 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           </table>
 
           <div class="total-section">
-            <div class="total-box">
-              <div class="total-row">
-                <span>Total Outstanding Balance</span>
+            <div class="total-box" style="width: 260px;">
+              <div style="display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px;">
+                <span>Subtotal (excl. tax):</span>
                 <span>${formatCurrency(data.totalBalance)}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px; color: #4b5563;">
+                <span>Tax (${data.avgTaxRate || 0}%):</span>
+                <span>${formatCurrency(data.totalTax || 0)}</span>
+              </div>
+              <div class="total-row">
+                <span>Grand Total (incl. tax)</span>
+                <span>${formatCurrency(data.grandTotal || data.totalBalance)}</span>
               </div>
             </div>
           </div>
