@@ -63,10 +63,12 @@ router.get('/', authenticateToken, async (req, res) => {
                 ? invoice.items.map(item => item.name).join(', ')
                 : invoice.description || 'Invoice';
 
-            // Amount (Grand Total)
-            const amount = invoice.total;
+            // Amount = subtotal (EXCLUDING tax)
+            // Tax is tracked separately and should NOT be included in the balance
+            const amount = invoice.subtotal || 0;
+            const taxAmount = invoice.taxAmount || 0;
 
-            // Update running balance
+            // Update running balance (subtotal only, no tax)
             runningBalance += amount;
 
             return {
@@ -74,28 +76,10 @@ router.get('/', authenticateToken, async (req, res) => {
                 invoiceDate: invoice.createdAt,
                 invoiceNumber: invoice.invoiceNumber,
                 description: description,
-                amount: amount,
-                payment: 0, // Hardcoded as per requirement
-                balance: amount, // Balance for this specific invoice is just the amount? 
-                // "Balance = Amount" might mean "outstanding amount for this invoice" 
-                // OR it might mean "running balance after this line".
-                // Usually SOA shows running balance.
-                // "Show running balance total at bottom" implies the table might just show line items.
-                // But usually the 'Balance' column in SOA is the running balance.
-                // Requirement says: "Balance = Amount". This is ambiguous.
-                // "Show running balance total at bottom" - okay.
-                // If "Balance = Amount", then the column just repeats the Amount?
-                // I will format it as: Amount | Payment | Balance (Running Balance)
-                // Wait, re-reading: "Balance = Amount". 
-                // If I just put Amount in Balance column, it's redundant.
-                // I will interpret "Balance = Amount" as "Outstanding Balance of this invoice".
-                // Since Payment=0, Outstanding = Amount.
-                // But for an SOA, usually you have a running balance column.
-                // I'll return the calculated running balance as well, just in case.
-                // Let's stick to the prompt's explicit "Balance = Amount" for the column logic if strictly followed,
-                // but standard accounting SOA implies running balance.
-                // I'll generate the response structure so frontend can decide.
-                runningBalance: runningBalance // Use this for the 'Balance' column if I decide so, or just for the bottom total.
+                amount: amount,        // Subtotal (excl. tax)
+                taxAmount: taxAmount,  // Tax shown separately
+                payment: 0,
+                runningBalance: runningBalance
             };
         });
 
