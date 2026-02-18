@@ -27,6 +27,7 @@ console.log('🔧 Cloudinary configured:', !!process.env.CLOUDINARY_CLOUD_NAME);
 app.use(cors({
   origin: [
     'http://localhost:3000',
+    'https://crm.royalservehotelsupplies.ae',
     'https://business-manager-pro.onrender.com',
     'https://royalbusinessappuae.vercel.app',
     process.env.FRONTEND_URL
