@@ -95,6 +95,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const seenInvoiceNumbers = new Set();
 
         let finalRunningBalance = 0;
+        let totalTax = 0;
 
         for (const item of statementItems) {
             if (!seenInvoiceNumbers.has(item.invoiceNumber)) {
@@ -102,18 +103,29 @@ router.get('/', authenticateToken, async (req, res) => {
 
                 // Recalculate running balance strictly on unique items
                 finalRunningBalance += item.amount;
+                totalTax += item.taxAmount;
                 item.runningBalance = finalRunningBalance;
 
                 uniqueInvoices.push(item);
             }
         }
 
+        const grandTotal = finalRunningBalance + totalTax;
+
+        // Calculate effective tax rate (weighted average, for display)
+        const avgTaxRate = finalRunningBalance > 0
+            ? Math.round((totalTax / finalRunningBalance) * 100)
+            : 0;
+
         const statementData = {
             customer_id,
             period: { from, to },
             statementDate: new Date(),
             invoices: uniqueInvoices,
-            totalBalance: finalRunningBalance
+            totalBalance: finalRunningBalance,  // Subtotal (excl. tax)
+            totalTax,                           // Total tax amount
+            grandTotal,                         // Grand total (incl. tax)
+            avgTaxRate                          // Effective tax rate %
         };
 
         // Check for PDF format
