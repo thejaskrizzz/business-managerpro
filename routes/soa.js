@@ -3,13 +3,13 @@ const router = express.Router();
 const Invoice = require('../models/Invoice');
 const Company = require('../models/Company');
 const Customer = require('../models/Customer');
-const auth = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const { generateSOAPDF } = require('../utils/pdfGenerator');
 
 // @route   GET /api/soa
 // @desc    Get Statement of Account for a customer
 // @access  Private
-router.get('/', auth, async (req, res) => {
+router.get('/', authenticateToken, async (req, res) => {
     try {
         const { customer_id, from, to } = req.query;
 

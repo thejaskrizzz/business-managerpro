@@ -186,56 +186,75 @@ const generateQuotePDF = async (quote, company, customer) => {
 
 // Generate SOA PDF
 const generateSOAPDF = async (statementData, company, customer) => {
-  let browser;
   try {
     // Get logo as base64 if available
-    const logoBase64 = company.logo ? await getLogoBase64(company.logo) : null;
+    const logoBase64 = company && company.logo ? await getLogoBase64(company.logo) : null;
 
     // Generate HTML content
     const htmlContent = await generateSOAHTML(statementData, company, customer, logoBase64);
 
-    console.log('Starting PDF generation for SOA');
+    console.log('Starting PDF generation for SOA using html-pdf-node');
 
-    // Launch browser
-    browser = await launchPuppeteer();
-    const page = await browser.newPage();
+    // Use html-pdf-node as primary (consistent with rest of file)
+    const options = {
+      format: 'A4',
+      margin: { top: '15mm', right: '10mm', bottom: '15mm', left: '10mm' },
+      printBackground: true,
+      displayHeaderFooter: false,
+      preferCSSPageSize: false,
+      timeout: 60000,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor',
+        '--disable-extensions',
+        '--disable-plugins'
+      ]
+    };
 
-    // Set viewport
-    await page.setViewport({ width: 1200, height: 1600, deviceScaleFactor: 2 });
-    await page.setContent(htmlContent, {
-      waitUntil: 'networkidle0',
-      timeout: 30000
-    });
-
-    // Generate PDF
-    const pdfBuffer = await page.pdf({
-      ...PDF_OPTIONS,
-      displayHeaderFooter: true,
-      headerTemplate: '<div></div>',
-      footerTemplate: `
-          <div style="font-size: 8px; text-align: center; width: 100%; padding: 10px; color: #666;">
-            Page <span class="pageNumber"></span> of <span class="totalPages"></span>
-          </div>
-        `,
-      margin: { top: '20mm', right: '10mm', bottom: '20mm', left: '10mm' }
-    });
+    const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
 
     return {
       buffer: pdfBuffer,
-      filename: `SOA-${customer.firstName}-${statementData.period.to}.pdf`,
+      filename: `SOA-${customer ? customer.firstName : 'Customer'}-${statementData.period.to}.pdf`,
       isHtml: false
     };
   } catch (error) {
-    console.error('PDF generation error:', error);
-    // Fallback
-    const fallbackHtml = await generateSOAHTML(statementData, company, customer, null);
-    return {
-      buffer: Buffer.from(fallbackHtml),
-      filename: `SOA-${customer.firstName}.html`,
-      isHtml: true
-    };
-  } finally {
-    if (browser) await browser.close();
+    console.error('PDF generation error (html-pdf-node), trying Puppeteer fallback:', error.message);
+    // Fallback to Puppeteer
+    let browser;
+    try {
+      const htmlContent = await generateSOAHTML(statementData, company, customer, null);
+      browser = await launchPuppeteer();
+      const page = await browser.newPage();
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0', timeout: 30000 });
+      const pdfBuffer = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '15mm', right: '10mm', bottom: '15mm', left: '10mm' }
+      });
+      return {
+        buffer: pdfBuffer,
+        filename: `SOA-${customer ? customer.firstName : 'Customer'}-${statementData.period.to}.pdf`,
+        isHtml: false
+      };
+    } catch (puppeteerError) {
+      console.error('Puppeteer fallback also failed:', puppeteerError.message);
+      // Last resort: return HTML
+      const fallbackHtml = await generateSOAHTML(statementData, company, customer, null);
+      return {
+        buffer: Buffer.from(fallbackHtml),
+        filename: `SOA-${customer ? customer.firstName : 'Customer'}.html`,
+        isHtml: true
+      };
+    } finally {
+      if (browser) {
+        try { await browser.close(); } catch (e) { /* ignore */ }
+      }
+    }
   }
 };
 
