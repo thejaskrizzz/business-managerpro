@@ -108,7 +108,6 @@ const launchPuppeteer = async () => {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
         '--disable-gpu',
         '--disable-web-security',
         '--disable-features=VizDisplayCompositor'
@@ -331,8 +330,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                 <th>Date</th>
                 <th>Invoice No</th>
                 <th>Description</th>
-                <th class="amount-col">Amount (excl. tax)</th>
-                <th class="amount-col">Tax</th>
+                <th class="amount-col">Amount</th>
                 <th class="amount-col">Payment</th>
                 <th class="amount-col">Balance</th>
               </tr>
@@ -344,7 +342,6 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                   <td>${inv.invoiceNumber}</td>
                   <td>${inv.description}</td>
                   <td class="amount-col">${formatCurrency(inv.amount)}</td>
-                  <td class="amount-col">${formatCurrency(inv.taxAmount || 0)}</td>
                   <td class="amount-col">${formatCurrency(inv.payment)}</td>
                   <td class="amount-col">${formatCurrency(inv.runningBalance)}</td>
                 </tr>
@@ -353,18 +350,10 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           </table>
 
           <div class="total-section">
-            <div class="total-box" style="width: 260px;">
-              <div style="display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px;">
-                <span>Subtotal (excl. tax):</span>
-                <span>${formatCurrency(data.totalBalance)}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px; color: #4b5563;">
-                <span>Tax (${data.avgTaxRate || 0}%):</span>
-                <span>${formatCurrency(data.totalTax || 0)}</span>
-              </div>
+            <div class="total-box">
               <div class="total-row">
-                <span>Grand Total (incl. tax)</span>
-                <span>${formatCurrency(data.grandTotal || data.totalBalance)}</span>
+                <span>Total Outstanding Balance</span>
+                <span>${formatCurrency(data.totalBalance)}</span>
               </div>
             </div>
           </div>
@@ -1515,6 +1504,7 @@ const generateInvoiceHTML = (invoice, company, customer, logoBase64) => {
               <div class="address-content">
                 <div class="address-name">${customer.firstName} ${customer.lastName}</div>
                 ${customer.companyName ? `<div class="address-company">${customer.companyName}</div>` : ''}
+                ${customer.vatNumber ? `<p><strong>VAT Number:</strong> ${customer.vatNumber}</p>` : ''}
                 ${customer.address.street ? `<p>${customer.address.street}</p>` : ''}
                 ${customer.address.city ? `<p>${customer.address.city}, ${customer.address.state} ${customer.address.zipCode}</p>` : ''}
                 ${customer.address.country ? `<p>${customer.address.country}</p>` : ''}
@@ -2385,11 +2375,238 @@ const generatePurchaseOrderHTML = async (purchaseOrder, company, vendor, client)
     `;
 };
 
+// Generate Credit Note PDF
+const generateCreditNotePDF = async (creditNote, company, customer) => {
+  try {
+    ensureUploadsDir();
+
+    const formatDate = (dateString) => {
+      return new Date(dateString).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+    };
+
+    const formatCurrency = (amount) => {
+      const currencySymbols = { USD: '$', EUR: '€', GBP: '£', AED: 'AED ', INR: '₹', CAD: 'C$', AUD: 'A$' };
+      const symbol = currencySymbols[company.settings?.currency] || '₹';
+      return `${symbol}${Number(amount || 0).toFixed(2)}`;
+    };
+
+    const logoBase64 = await getLogoBase64(company.logo);
+    const sourceRef = creditNote.sourceType === 'invoice'
+      ? (creditNote.originalInvoice?.invoiceNumber || 'N/A')
+      : (creditNote.originalSale?.saleNumber || 'N/A');
+
+    const statusColors = {
+      unused: '#10b981',
+      partially_used: '#f59e0b',
+      fully_used: '#6b7280',
+      expired: '#ef4444'
+    };
+    const statusColor = statusColors[creditNote.status] || '#6b7280';
+    const statusLabel = creditNote.status.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 10px; color: #1f2937; background: white; }
+          .container { max-width: 780px; margin: 0 auto; padding: 20px; }
+          .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 2px solid #e5e7eb; }
+          .company-info { flex: 1; }
+          .company-name { font-size: 18px; font-weight: 700; color: #111827; margin-bottom: 4px; }
+          .company-details { font-size: 9px; color: #6b7280; line-height: 1.5; }
+          .logo-container { width: 80px; height: 80px; }
+          .logo-container img { max-width: 80px; max-height: 80px; object-fit: contain; }
+          .cn-title { text-align: center; margin-bottom: 20px; }
+          .cn-title h1 { font-size: 22px; font-weight: 700; color: #dc2626; letter-spacing: 1px; }
+          .cn-title .cn-number { font-size: 14px; color: #374151; margin-top: 4px; }
+          .info-grid { display: flex; justify-content: space-between; margin-bottom: 20px; gap: 20px; }
+          .info-box { flex: 1; background: #f9fafb; padding: 12px; border-radius: 6px; border: 1px solid #e5e7eb; }
+          .info-box-title { font-size: 8px; text-transform: uppercase; color: #6b7280; font-weight: 600; margin-bottom: 6px; letter-spacing: 0.5px; }
+          .info-box p { font-size: 10px; line-height: 1.6; color: #374151; }
+          .info-box strong { color: #111827; }
+          .status-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 9px; font-weight: 600; color: white; background-color: ${statusColor}; }
+          .items-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+          .items-table th { background: #f3f4f6; padding: 8px 10px; font-size: 9px; text-transform: uppercase; color: #6b7280; font-weight: 600; border-bottom: 2px solid #e5e7eb; text-align: left; }
+          .items-table td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; font-size: 10px; }
+          .items-table tr:last-child td { border-bottom: 2px solid #e5e7eb; }
+          .text-right { text-align: right; }
+          .totals { display: flex; justify-content: flex-end; margin-bottom: 20px; }
+          .totals-box { width: 280px; }
+          .totals-row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 10px; }
+          .totals-row.total { border-top: 2px solid #dc2626; padding-top: 10px; margin-top: 4px; font-size: 14px; font-weight: 700; color: #dc2626; }
+          .totals-row.used { color: #6b7280; }
+          .totals-row.remaining { border-top: 1px solid #e5e7eb; padding-top: 8px; font-weight: 600; color: #059669; }
+          .reason-box { background: #fef3c7; padding: 12px; border-radius: 6px; border: 1px solid #fcd34d; margin-bottom: 20px; }
+          .reason-title { font-size: 9px; font-weight: 600; color: #92400e; margin-bottom: 4px; }
+          .reason-text { font-size: 10px; color: #78350f; }
+          .footer { text-align: center; margin-top: 30px; padding-top: 16px; border-top: 1px solid #e5e7eb; font-size: 8px; color: #9ca3af; }
+          .terms { margin-top: 20px; font-size: 9px; color: #6b7280; line-height: 1.5; }
+          .terms-title { font-weight: 600; margin-bottom: 4px; color: #374151; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="company-info">
+              <div class="company-name">${company.name || 'Company'}</div>
+              <div class="company-details">
+                ${company.email ? `<div>${company.email}</div>` : ''}
+                ${company.phone ? `<div>${company.phone}</div>` : ''}
+                ${company.address?.street ? `<div>${company.address.street}</div>` : ''}
+                ${company.address?.city ? `<div>${[company.address.city, company.address.state, company.address.zipCode].filter(Boolean).join(', ')}</div>` : ''}
+                ${company.address?.country ? `<div>${company.address.country}</div>` : ''}
+              </div>
+            </div>
+            ${logoBase64 ? `<div class="logo-container"><img src="data:image/png;base64,${logoBase64}" alt="Logo"/></div>` : ''}
+          </div>
+
+          <div class="cn-title">
+            <h1>CREDIT NOTE</h1>
+            <div class="cn-number">${creditNote.creditNoteNumber || 'N/A'}</div>
+          </div>
+
+          <div class="info-grid">
+            <div class="info-box">
+              <div class="info-box-title">Credit Note Details</div>
+              <p><strong>CN Number:</strong> ${creditNote.creditNoteNumber}</p>
+              <p><strong>Date:</strong> ${formatDate(creditNote.createdAt)}</p>
+              <p><strong>Source:</strong> ${creditNote.sourceType === 'invoice' ? 'Invoice' : 'Sale'} ${sourceRef}</p>
+              <p><strong>Status:</strong> <span class="status-badge">${statusLabel}</span></p>
+              ${creditNote.expiryDate ? `<p><strong>Expires:</strong> ${formatDate(creditNote.expiryDate)}</p>` : ''}
+            </div>
+            <div class="info-box">
+              <div class="info-box-title">Customer</div>
+              <p><strong>${customer ? `${customer.firstName} ${customer.lastName}` : 'N/A'}</strong></p>
+              ${customer?.companyName ? `<p>${customer.companyName}</p>` : ''}
+              ${customer?.email ? `<p>${customer.email}</p>` : ''}
+              ${customer?.phone ? `<p>${customer.phone}</p>` : ''}
+              ${customer?.address?.street ? `<p>${customer.address.street}</p>` : ''}
+              ${customer?.address?.city ? `<p>${[customer.address.city, customer.address.state, customer.address.zipCode].filter(Boolean).join(', ')}</p>` : ''}
+            </div>
+          </div>
+
+          <table class="items-table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Item</th>
+                <th>SKU</th>
+                <th class="text-right">Qty Returned</th>
+                <th class="text-right">Unit Price</th>
+                <th class="text-right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${creditNote.returnedItems.map((item, idx) => `
+                <tr>
+                  <td>${idx + 1}</td>
+                  <td><strong>${item.productName || 'N/A'}</strong></td>
+                  <td>${item.productSku || '-'}</td>
+                  <td class="text-right">${item.quantity}</td>
+                  <td class="text-right">${formatCurrency(item.unitPrice)}</td>
+                  <td class="text-right">${formatCurrency(item.total)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+
+          <div class="totals">
+            <div class="totals-box">
+              <div class="totals-row"><span>Subtotal</span><span>${formatCurrency(creditNote.subtotal)}</span></div>
+              ${creditNote.taxRate > 0 ? `<div class="totals-row"><span>Tax (${creditNote.taxRate}%)</span><span>${formatCurrency(creditNote.taxAmount)}</span></div>` : ''}
+              <div class="totals-row total"><span>Credit Amount</span><span>${formatCurrency(creditNote.creditAmount)}</span></div>
+              ${creditNote.usedAmount > 0 ? `<div class="totals-row used"><span>Used Amount</span><span>-${formatCurrency(creditNote.usedAmount)}</span></div>` : ''}
+              <div class="totals-row remaining"><span>Remaining Balance</span><span>${formatCurrency(creditNote.remainingBalance)}</span></div>
+            </div>
+          </div>
+
+          ${creditNote.returnReason ? `
+            <div class="reason-box">
+              <div class="reason-title">Return Reason</div>
+              <div class="reason-text">${creditNote.returnReason}</div>
+            </div>
+          ` : ''}
+
+          ${creditNote.notes ? `
+            <div class="terms">
+              <div class="terms-title">Notes</div>
+              <p>${creditNote.notes}</p>
+            </div>
+          ` : ''}
+
+          <div class="terms">
+            <div class="terms-title">Terms & Conditions</div>
+            <p>This credit note can be applied against future purchases. ${creditNote.expiryDate ? `Valid until ${formatDate(creditNote.expiryDate)}.` : 'No expiry date.'}</p>
+            <p>Credit is non-transferable and cannot be exchanged for cash.</p>
+          </div>
+
+          <div class="footer">
+            <p>Generated on ${formatDate(new Date().toISOString())} | ${company.name}</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const options = {
+      format: 'A4',
+      margin: { top: '6mm', right: '6mm', bottom: '6mm', left: '6mm' },
+      printBackground: true,
+      displayHeaderFooter: false,
+      preferCSSPageSize: true,
+      timeout: 60000,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-web-security'
+      ]
+    };
+
+    try {
+      const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
+      return pdfBuffer;
+    } catch (err) {
+      console.log('html-pdf-node failed for credit note, trying Puppeteer...');
+      const browser = await launchPuppeteer();
+      const page = await browser.newPage();
+      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+      const pdfBuffer = await page.pdf({
+        format: 'A4',
+        printBackground: true,
+        margin: { top: '6mm', right: '6mm', bottom: '6mm', left: '6mm' },
+        preferCSSPageSize: true,
+        displayHeaderFooter: false
+      });
+      await browser.close();
+      return pdfBuffer;
+    }
+  } catch (error) {
+    console.error('Credit note PDF generation error:', error);
+
+    // Fallback to HTML
+    return {
+      buffer: Buffer.from('<html><body><h1>Credit Note PDF Generation Failed</h1><p>Please try again later.</p></body></html>'),
+      filename: `credit-note-${creditNote.creditNoteNumber || 'unknown'}.html`,
+      isHtml: true
+    };
+  }
+};
+
 module.exports = {
   generateQuotePDF,
   generateInvoicePDF,
   generateSOAPDF,
   generatePurchaseOrderPDF,
+  generateCreditNotePDF,
   // New export for Delivery Order PDFs
   generateDeliveryOrderPDF: async (sale, company, customer) => {
     // Build a delivery order HTML and render to PDF (no prices, includes SI No., image, qty)

@@ -70,6 +70,7 @@ app.use('/api/products', require('./routes/products'));
 app.use('/api/sales', require('./routes/sales'));
 app.use('/api/expenses', require('./routes/expenses'));
 app.use('/api/soa', require('./routes/soa'));
+app.use('/api/credit-notes', require('./routes/creditNotes'));
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

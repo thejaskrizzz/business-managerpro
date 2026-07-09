@@ -133,6 +133,42 @@ const companySchema = new mongoose.Schema({
       default: 14,
       min: [1, 'Quote validity must be at least 1 day'],
       max: [365, 'Quote validity cannot exceed 365 days']
+    },
+    // Credit Note settings
+    creditNotePrefix: {
+      type: String,
+      default: 'CN',
+      maxlength: [10, 'Credit note prefix cannot exceed 10 characters']
+    },
+    nextCreditNoteNumber: {
+      type: Number,
+      default: 1
+    },
+    creditNoteExpiryEnabled: {
+      type: Boolean,
+      default: false
+    },
+    creditNoteExpiryDays: {
+      type: Number,
+      default: 365,
+      min: [1, 'Expiry must be at least 1 day'],
+      max: [3650, 'Expiry cannot exceed 10 years']
+    },
+    quoteEmailSubject: {
+      type: String,
+      default: 'Quote {{quoteNumber}} from {{companyName}}'
+    },
+    quoteEmailBody: {
+      type: String,
+      default: 'Dear {{customerName}},\n\nPlease find attached the quote {{quoteNumber}} for your review.\n\nTotal: {{totalAmount}}\n\nThank you for your business!'
+    },
+    invoiceEmailSubject: {
+      type: String,
+      default: 'Invoice {{invoiceNumber}} from {{companyName}}'
+    },
+    invoiceEmailBody: {
+      type: String,
+      default: 'Dear {{customerName}},\n\nPlease find attached the invoice {{invoiceNumber}} for your review.\n\nTotal: {{totalAmount}}\nAmount Paid: {{paidAmount}}\nBalance Due: {{balanceDue}}\n\nThank you for your business!'
     }
   },
   isActive: {

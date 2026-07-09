@@ -63,12 +63,10 @@ router.get('/', authenticateToken, async (req, res) => {
                 ? invoice.items.map(item => item.name).join(', ')
                 : invoice.description || 'Invoice';
 
-            // Amount = subtotal (EXCLUDING tax)
-            // Tax is tracked separately and should NOT be included in the balance
-            const amount = invoice.subtotal || 0;
-            const taxAmount = invoice.taxAmount || 0;
+            // Amount (Grand Total)
+            const amount = invoice.total;
 
-            // Update running balance (subtotal only, no tax)
+            // Update running balance
             runningBalance += amount;
 
             return {
@@ -76,10 +74,28 @@ router.get('/', authenticateToken, async (req, res) => {
                 invoiceDate: invoice.createdAt,
                 invoiceNumber: invoice.invoiceNumber,
                 description: description,
-                amount: amount,        // Subtotal (excl. tax)
-                taxAmount: taxAmount,  // Tax shown separately
-                payment: 0,
-                runningBalance: runningBalance
+                amount: amount,
+                payment: 0, // Hardcoded as per requirement
+                balance: amount, // Balance for this specific invoice is just the amount? 
+                // "Balance = Amount" might mean "outstanding amount for this invoice" 
+                // OR it might mean "running balance after this line".
+                // Usually SOA shows running balance.
+                // "Show running balance total at bottom" implies the table might just show line items.
+                // But usually the 'Balance' column in SOA is the running balance.
+                // Requirement says: "Balance = Amount". This is ambiguous.
+                // "Show running balance total at bottom" - okay.
+                // If "Balance = Amount", then the column just repeats the Amount?
+                // I will format it as: Amount | Payment | Balance (Running Balance)
+                // Wait, re-reading: "Balance = Amount". 
+                // If I just put Amount in Balance column, it's redundant.
+                // I will interpret "Balance = Amount" as "Outstanding Balance of this invoice".
+                // Since Payment=0, Outstanding = Amount.
+                // But for an SOA, usually you have a running balance column.
+                // I'll return the calculated running balance as well, just in case.
+                // Let's stick to the prompt's explicit "Balance = Amount" for the column logic if strictly followed,
+                // but standard accounting SOA implies running balance.
+                // I'll generate the response structure so frontend can decide.
+                runningBalance: runningBalance // Use this for the 'Balance' column if I decide so, or just for the bottom total.
             };
         });
 
@@ -95,7 +111,6 @@ router.get('/', authenticateToken, async (req, res) => {
         const seenInvoiceNumbers = new Set();
 
         let finalRunningBalance = 0;
-        let totalTax = 0;
 
         for (const item of statementItems) {
             if (!seenInvoiceNumbers.has(item.invoiceNumber)) {
@@ -103,29 +118,18 @@ router.get('/', authenticateToken, async (req, res) => {
 
                 // Recalculate running balance strictly on unique items
                 finalRunningBalance += item.amount;
-                totalTax += item.taxAmount;
                 item.runningBalance = finalRunningBalance;
 
                 uniqueInvoices.push(item);
             }
         }
 
-        const grandTotal = finalRunningBalance + totalTax;
-
-        // Calculate effective tax rate (weighted average, for display)
-        const avgTaxRate = finalRunningBalance > 0
-            ? Math.round((totalTax / finalRunningBalance) * 100)
-            : 0;
-
         const statementData = {
             customer_id,
             period: { from, to },
             statementDate: new Date(),
             invoices: uniqueInvoices,
-            totalBalance: finalRunningBalance,  // Subtotal (excl. tax)
-            totalTax,                           // Total tax amount
-            grandTotal,                         // Grand total (incl. tax)
-            avgTaxRate                          // Effective tax rate %
+            totalBalance: finalRunningBalance
         };
 
         // Check for PDF format

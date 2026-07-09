@@ -52,9 +52,19 @@ router.get('/', authenticateToken, requireSameCompany, async (req, res) => {
           }}
         ]);
 
+        const CreditNote = require('../models/CreditNote');
+        const cnStats = await CreditNote.aggregate([
+          { $match: { customer: customer._id, company: customer.company, status: { $in: ['unused', 'partially_used'] } } },
+          { $group: {
+            _id: null,
+            remainingBalance: { $sum: '$remainingBalance' }
+          }}
+        ]);
+
         const customerObj = customer.toObject();
         customerObj.totalQuotes = stats[0]?.totalQuotes || 0;
         customerObj.totalValue = stats[0]?.totalValue || 0;
+        customerObj.creditBalance = cnStats[0]?.remainingBalance || 0;
         
         return customerObj;
       })

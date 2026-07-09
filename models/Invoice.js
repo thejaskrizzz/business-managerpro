@@ -143,6 +143,27 @@ const invoiceSchema = new mongoose.Schema({
   customerSignature: {
     type: String,
     trim: true
+  },
+  // Credit Note tracking
+  creditApplied: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  creditNoteRedemptions: [{
+    creditNote: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'CreditNote'
+    },
+    amount: {
+      type: Number,
+      required: true,
+      min: 0
+    }
+  }],
+  finalPayable: {
+    type: Number,
+    min: 0
   }
 }, {
   timestamps: true
@@ -167,6 +188,12 @@ invoiceSchema.pre('save', async function(next) {
     
     // Calculate paid amount
     this.paidAmount = this.payments.reduce((sum, payment) => sum + payment.amount, 0);
+    
+    // Calculate credit applied
+    this.creditApplied = this.creditNoteRedemptions.reduce((sum, r) => sum + r.amount, 0);
+    
+    // Calculate final payable (total minus credit applied)
+    this.finalPayable = Math.max(0, this.total - this.creditApplied);
     
     // Generate invoice number if this is a new invoice
     if (this.isNew && !this.invoiceNumber) {

@@ -4,6 +4,7 @@ const Invoice = require('../models/Invoice');
 const Customer = require('../models/Customer');
 const Quote = require('../models/Quote');
 const Company = require('../models/Company');
+const CreditNote = require('../models/CreditNote');
 const { authenticateToken, requireRole, requireSameCompany } = require('../middleware/auth');
 const { sendInvoiceEmail } = require('../utils/emailService');
 
@@ -92,10 +93,49 @@ router.get('/:id', authenticateToken, requireSameCompany, async (req, res) => {
 // Create new invoice
 router.post('/', authenticateToken, requireRole('admin', 'manager'), requireSameCompany, async (req, res) => {
   try {
+    let creditRedemptions = [];
+    if (req.body.creditApplied && Number(req.body.creditApplied) > 0) {
+      const creditApplied = Number(req.body.creditApplied);
+      const customerId = req.body.customer;
+      
+      const now = new Date();
+      const creditNotes = await CreditNote.find({
+        company: req.user.company._id,
+        customer: customerId,
+        status: { $in: ['unused', 'partially_used'] },
+        $or: [
+          { expiryDate: null },
+          { expiryDate: { $gt: now } }
+        ]
+      }).sort({ createdAt: 1 });
+
+      const totalAvailable = creditNotes.reduce((sum, cn) => sum + cn.remainingBalance, 0);
+      if (creditApplied > totalAvailable) {
+        return res.status(400).json({
+          message: `Insufficient customer credit available. Available: ${totalAvailable.toFixed(2)}, requested: ${creditApplied.toFixed(2)}`
+        });
+      }
+
+      let remaining = creditApplied;
+      for (const cn of creditNotes) {
+        if (remaining <= 0) break;
+        const deduction = Math.min(remaining, cn.remainingBalance);
+        
+        creditRedemptions.push({
+          creditNote: cn._id,
+          amount: deduction
+        });
+
+        remaining -= deduction;
+      }
+    }
+
     const invoiceData = {
       ...req.body,
       company: req.user.company._id,
-      createdBy: req.user._id
+      createdBy: req.user._id,
+      creditApplied: req.body.creditApplied || 0,
+      creditNoteRedemptions: creditRedemptions
     };
     
     // Debug: Log the invoice data before saving
@@ -105,11 +145,27 @@ router.post('/', authenticateToken, requireRole('admin', 'manager'), requireSame
       title: invoiceData.title,
       items: invoiceData.items?.length || 0,
       subtotal: invoiceData.subtotal,
-      total: invoiceData.total
+      total: invoiceData.total,
+      creditApplied: invoiceData.creditApplied
     });
     
     const invoice = new Invoice(invoiceData);
     await invoice.save();
+
+    // Save redemptions to CreditNote documents
+    for (const redemption of creditRedemptions) {
+      const cn = await CreditNote.findById(redemption.creditNote);
+      if (cn) {
+        cn.redemptions.push({
+          invoice: invoice._id,
+          amount: redemption.amount,
+          date: new Date(),
+          notes: `Applied to invoice ${invoice.invoiceNumber}`
+        });
+        cn.usedAmount += redemption.amount;
+        await cn.save();
+      }
+    }
     
     await invoice.populate('customer', 'firstName lastName companyName email');
     await invoice.populate('tax', 'name percentage');
@@ -241,8 +297,86 @@ router.put('/:id', authenticateToken, requireRole('admin', 'manager'), requireSa
       return res.status(403).json({ message: 'Access denied' });
     }
     
+    // Handle credit note redemptions update
+    if (req.body.creditApplied !== undefined) {
+      // 1. Revert existing redemptions for this invoice
+      if (invoice.creditNoteRedemptions && invoice.creditNoteRedemptions.length > 0) {
+        for (const redemption of invoice.creditNoteRedemptions) {
+          const cn = await CreditNote.findById(redemption.creditNote);
+          if (cn) {
+            cn.redemptions = cn.redemptions.filter(
+              r => !r.invoice || r.invoice.toString() !== invoice._id.toString()
+            );
+            cn.usedAmount = cn.redemptions.reduce((sum, r) => sum + r.amount, 0);
+            await cn.save();
+          }
+        }
+        invoice.creditNoteRedemptions = [];
+        invoice.creditApplied = 0;
+      }
+
+      // 2. Apply the new credit
+      const creditApplied = Number(req.body.creditApplied);
+      if (creditApplied > 0) {
+        const customerId = req.body.customer || invoice.customer;
+        const now = new Date();
+        const creditNotes = await CreditNote.find({
+          company: req.user.company._id,
+          customer: customerId,
+          status: { $in: ['unused', 'partially_used'] },
+          $or: [
+            { expiryDate: null },
+            { expiryDate: { $gt: now } }
+          ]
+        }).sort({ createdAt: 1 });
+
+        const totalAvailable = creditNotes.reduce((sum, cn) => sum + cn.remainingBalance, 0);
+        if (creditApplied > totalAvailable) {
+          return res.status(400).json({
+            message: `Insufficient customer credit available. Available: ${totalAvailable.toFixed(2)}, requested: ${creditApplied.toFixed(2)}`
+          });
+        }
+
+        let remaining = creditApplied;
+        let creditRedemptions = [];
+        for (const cn of creditNotes) {
+          if (remaining <= 0) break;
+          const deduction = Math.min(remaining, cn.remainingBalance);
+          
+          creditRedemptions.push({
+            creditNote: cn._id,
+            amount: deduction
+          });
+
+          remaining -= deduction;
+        }
+
+        invoice.creditNoteRedemptions = creditRedemptions;
+        invoice.creditApplied = creditApplied;
+
+        // Save new redemptions to CreditNote documents
+        for (const redemption of creditRedemptions) {
+          const cn = await CreditNote.findById(redemption.creditNote);
+          if (cn) {
+            cn.redemptions.push({
+              invoice: invoice._id,
+              amount: redemption.amount,
+              date: new Date(),
+              notes: `Applied to invoice ${invoice.invoiceNumber}`
+            });
+            cn.usedAmount += redemption.amount;
+            await cn.save();
+          }
+        }
+      }
+    }
+
+    const updateBody = { ...req.body };
+    delete updateBody.creditApplied;
+    delete updateBody.creditNoteRedemptions;
+
     // Update invoice fields
-    Object.assign(invoice, req.body);
+    Object.assign(invoice, updateBody);
     
     // Save the invoice to trigger pre-save middleware for recalculation
     await invoice.save();

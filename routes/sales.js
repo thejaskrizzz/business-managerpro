@@ -5,6 +5,7 @@ const Product = require('../models/Product');
 const Customer = require('../models/Customer');
 const { authenticateToken } = require('../middleware/auth');
 const Company = require('../models/Company');
+const CreditNote = require('../models/CreditNote');
 
 // Get all sales for a company
 router.get('/', authenticateToken, async (req, res) => {
@@ -167,8 +168,67 @@ router.post('/', authenticateToken, async (req, res) => {
       }
     }
 
+    let creditRedemptions = [];
+    if (req.body.creditApplied && Number(req.body.creditApplied) > 0) {
+      const creditApplied = Number(req.body.creditApplied);
+      const customerId = saleData.customer;
+      
+      if (!customerId) {
+        return res.status(400).json({ message: 'Customer ID is required to apply credit' });
+      }
+
+      const now = new Date();
+      const creditNotes = await CreditNote.find({
+        company: req.user.company,
+        customer: customerId,
+        status: { $in: ['unused', 'partially_used'] },
+        $or: [
+          { expiryDate: null },
+          { expiryDate: { $gt: now } }
+        ]
+      }).sort({ createdAt: 1 });
+
+      const totalAvailable = creditNotes.reduce((sum, cn) => sum + cn.remainingBalance, 0);
+      if (creditApplied > totalAvailable) {
+        return res.status(400).json({
+          message: `Insufficient customer credit available. Available: ${totalAvailable.toFixed(2)}, requested: ${creditApplied.toFixed(2)}`
+        });
+      }
+
+      let remaining = creditApplied;
+      for (const cn of creditNotes) {
+        if (remaining <= 0) break;
+        const deduction = Math.min(remaining, cn.remainingBalance);
+        
+        creditRedemptions.push({
+          creditNote: cn._id,
+          amount: deduction
+        });
+
+        remaining -= deduction;
+      }
+    }
+
+    saleData.creditApplied = req.body.creditApplied || 0;
+    saleData.creditNoteRedemptions = creditRedemptions;
+
     const sale = new Sale(saleData);
     await sale.save();
+
+    // Save redemptions to CreditNote documents
+    for (const redemption of creditRedemptions) {
+      const cn = await CreditNote.findById(redemption.creditNote);
+      if (cn) {
+        cn.redemptions.push({
+          sale: sale._id,
+          amount: redemption.amount,
+          date: new Date(),
+          notes: `Applied to sale ${sale.saleNumber}`
+        });
+        cn.usedAmount += redemption.amount;
+        await cn.save();
+      }
+    }
 
     const populatedSale = await Sale.findById(sale._id)
       .populate('customer', 'firstName lastName email phone')

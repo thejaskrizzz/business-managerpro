@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const path = require('path');
 const fs = require('fs');
+const { generateQuotePDF, generateInvoicePDF } = require('./pdfGenerator');
 
 // Email service configuration
 const createTransporter = () => {
@@ -311,23 +312,90 @@ const formatCurrency = (amount, currency = 'USD') => {
   return `${symbol}${amount.toFixed(2)}`;
 };
 
+// Helper function to replace {{placeholder}} tags
+const replacePlaceholders = (text, data) => {
+  if (!text) return '';
+  return text.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+    return data[key] !== undefined ? data[key] : match;
+  });
+};
+
+// Helper function to wrap message body in professional HTML structure
+const wrapInEmailTemplate = (body, companyName) => {
+  const formattedBody = body.replace(/\n/g, '<br/>');
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fb; }
+        .container { background: white; border-radius: 12px; padding: 30px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05); border: 1px solid #e9ecef; }
+        .header { text-align: center; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 2px solid #1e40af; }
+        .company-name { font-size: 20px; font-weight: 700; color: #1e40af; }
+        .message-body { font-size: 14px; color: #4b5563; line-height: 1.7; }
+        .footer { text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #e9ecef; color: #9ca3af; font-size: 11px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <span class="company-name">${companyName}</span>
+        </div>
+        <div class="message-body">
+          ${formattedBody}
+        </div>
+        <div class="footer">
+          <p>This is an automated message from ${companyName}. Please do not reply directly to this email.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+};
+
 // Send quote email
 const sendQuoteEmail = async (quoteData, customerEmail) => {
   try {
     const transporter = createTransporter();
-    const templates = getEmailTemplates();
     
     if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
       console.warn('Email credentials not configured. Skipping email send.');
       return { success: false, message: 'Email service not configured' };
     }
+
+    const settings = quoteData.company.settings || {};
+    const placeholderData = {
+      customerName: `${quoteData.customer.firstName} ${quoteData.customer.lastName}`,
+      quoteNumber: quoteData.quoteNumber,
+      totalAmount: formatCurrency(quoteData.total, settings.currency || 'USD'),
+      companyName: quoteData.company.name
+    };
+
+    const rawSubject = settings.quoteEmailSubject || 'Quote {{quoteNumber}} from {{companyName}}';
+    const rawBody = settings.quoteEmailBody || 'Dear {{customerName}},\n\nPlease find attached the quote {{quoteNumber}} for your review.\n\nTotal: {{totalAmount}}\n\nThank you for your business!';
+
+    const subject = replacePlaceholders(rawSubject, placeholderData);
+    const body = replacePlaceholders(rawBody, placeholderData);
+    const html = wrapInEmailTemplate(body, quoteData.company.name);
+
+    // Generate PDF to attach
+    console.log('Generating quote PDF attachment...');
+    const pdfResult = await generateQuotePDF(quoteData, quoteData.company, quoteData.customer);
     
     const mailOptions = {
       from: `"${quoteData.company.name}" <${process.env.EMAIL_USER}>`,
       to: customerEmail,
-      subject: templates.quote.subject(quoteData.quoteNumber, quoteData.company.name),
-      html: templates.quote.html(quoteData),
-      text: templates.quote.text(quoteData),
+      subject: subject,
+      html: html,
+      text: body,
+      attachments: [
+        {
+          filename: pdfResult.filename || `quote-${quoteData.quoteNumber}.pdf`,
+          content: pdfResult.buffer,
+          contentType: pdfResult.isHtml ? 'text/html' : 'application/pdf'
+        }
+      ]
     };
     
     const result = await transporter.sendMail(mailOptions);
@@ -357,71 +425,44 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
       console.warn('Email credentials not configured. Skipping email send.');
       return { success: false, message: 'Email service not configured' };
     }
-    
+
+    const settings = invoiceData.company.settings || {};
+    const placeholderData = {
+      customerName: `${invoiceData.customer.firstName} ${invoiceData.customer.lastName}`,
+      invoiceNumber: invoiceData.invoiceNumber,
+      totalAmount: formatCurrency(invoiceData.total, settings.currency || 'USD'),
+      paidAmount: formatCurrency(invoiceData.paidAmount || 0, settings.currency || 'USD'),
+      balanceDue: formatCurrency(invoiceData.total - (invoiceData.paidAmount || 0), settings.currency || 'USD'),
+      companyName: invoiceData.company.name
+    };
+
+    const rawSubject = settings.invoiceEmailSubject || 'Invoice {{invoiceNumber}} from {{companyName}}';
+    const rawBody = settings.invoiceEmailBody || 'Dear {{customerName}},\n\nPlease find attached the invoice {{invoiceNumber}} for your review.\n\nTotal: {{totalAmount}}\nAmount Paid: {{paidAmount}}\nBalance Due: {{balanceDue}}\n\nThank you for your business!';
+
+    const subject = replacePlaceholders(rawSubject, placeholderData);
+    const body = replacePlaceholders(rawBody, placeholderData);
+    const html = wrapInEmailTemplate(body, invoiceData.company.name);
+
+    // Generate PDF to attach
+    console.log('Generating invoice PDF attachment...');
+    const pdfResult = await generateInvoicePDF(invoiceData, invoiceData.company, invoiceData.customer);
+    const pdfBuffer = pdfResult.isHtml ? pdfResult.buffer : pdfResult;
+    const attachmentFilename = pdfResult.isHtml ? pdfResult.filename : `invoice-${invoiceData.invoiceNumber}.pdf`;
+    const attachmentContentType = pdfResult.isHtml ? 'text/html' : 'application/pdf';
+
     const mailOptions = {
       from: `"${invoiceData.company.name}" <${process.env.EMAIL_USER}>`,
       to: customerEmail,
-      subject: `Invoice ${invoiceData.invoiceNumber} from ${invoiceData.company.name}`,
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="utf-8">
-          <title>Invoice ${invoiceData.invoiceNumber}</title>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { text-align: center; margin-bottom: 30px; }
-            .invoice-title { font-size: 24px; font-weight: bold; margin: 20px 0; }
-            .info-section { background: #f8f9fb; padding: 20px; border-radius: 8px; margin: 20px 0; }
-            .total-section { background: #e9ecef; padding: 15px; border-radius: 8px; margin: 20px 0; }
-            .footer { text-align: center; margin-top: 30px; color: #666; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>${invoiceData.company.name}</h1>
-            </div>
-            
-            <h2 class="invoice-title">TAX INVOICE ${invoiceData.invoiceNumber}</h2>
-            
-            <div class="info-section">
-              <p><strong>Customer:</strong> ${invoiceData.customer.firstName} ${invoiceData.customer.lastName}</p>
-              <p><strong>Invoice Date:</strong> ${new Date(invoiceData.createdAt).toLocaleDateString()}</p>
-              <p><strong>Due Date:</strong> ${new Date(invoiceData.dueDate).toLocaleDateString()}</p>
-              <p><strong>Status:</strong> ${invoiceData.status.charAt(0).toUpperCase() + invoiceData.status.slice(1)}</p>
-            </div>
-            
-            <div class="total-section">
-              <p><strong>Total Amount:</strong> ${formatCurrency(invoiceData.total, invoiceData.company.settings?.currency || 'USD')}</p>
-              ${invoiceData.paidAmount > 0 ? `<p><strong>Paid Amount:</strong> ${formatCurrency(invoiceData.paidAmount, invoiceData.company.settings?.currency || 'USD')}</p>` : ''}
-              ${invoiceData.paidAmount < invoiceData.total ? `<p><strong>Balance Due:</strong> ${formatCurrency(invoiceData.total - invoiceData.paidAmount, invoiceData.company.settings?.currency || 'USD')}</p>` : ''}
-            </div>
-            
-            <div class="footer">
-              <p>View invoice online: ${process.env.FRONTEND_URL || 'http://localhost:3000'}/invoices/${invoiceData._id}</p>
-              <p>Contact: ${invoiceData.company.email}</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `,
-      text: `
-        Invoice ${invoiceData.invoiceNumber} from ${invoiceData.company.name}
-        
-        Customer: ${invoiceData.customer.firstName} ${invoiceData.customer.lastName}
-        Invoice Date: ${new Date(invoiceData.createdAt).toLocaleDateString()}
-        Due Date: ${new Date(invoiceData.dueDate).toLocaleDateString()}
-        Status: ${invoiceData.status.charAt(0).toUpperCase() + invoiceData.status.slice(1)}
-        
-        Total Amount: ${formatCurrency(invoiceData.total, invoiceData.company.settings?.currency || 'USD')}
-        ${invoiceData.paidAmount > 0 ? `Paid Amount: ${formatCurrency(invoiceData.paidAmount, invoiceData.company.settings?.currency || 'USD')}` : ''}
-        ${invoiceData.paidAmount < invoiceData.total ? `Balance Due: ${formatCurrency(invoiceData.total - invoiceData.paidAmount, invoiceData.company.settings?.currency || 'USD')}` : ''}
-        
-        View invoice online: ${process.env.FRONTEND_URL || 'http://localhost:3000'}/invoices/${invoiceData._id}
-        Contact: ${invoiceData.company.email}
-      `
+      subject: subject,
+      html: html,
+      text: body,
+      attachments: [
+        {
+          filename: attachmentFilename,
+          content: pdfBuffer,
+          contentType: attachmentContentType
+        }
+      ]
     };
     
     const result = await transporter.sendMail(mailOptions);

@@ -35,6 +35,11 @@ const customerSchema = new mongoose.Schema({
     trim: true,
     maxlength: [100, 'Company name cannot exceed 100 characters']
   },
+  vatNumber: {
+    type: String,
+    trim: true,
+    maxlength: [50, 'VAT number cannot exceed 50 characters']
+  },
   address: {
     street: {
       type: String,
