@@ -3,7 +3,108 @@ const path = require('path');
 const fs = require('fs');
 const { generateQuotePDF, generateInvoicePDF } = require('./pdfGenerator');
 
-// Email service configuration
+// HTTP request helper function with fetch fallback to Node's native https module
+const makeRequest = async (url, method, headers, body = null) => {
+  if (typeof fetch !== 'undefined') {
+    const options = {
+      method,
+      headers
+    };
+    if (body) {
+      options.body = JSON.stringify(body);
+    }
+    const response = await fetch(url, options);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || `HTTP error! status: ${response.status}`);
+    }
+    return data;
+  } else {
+    const https = require('https');
+    const { URL } = require('url');
+    const parsedUrl = new URL(url);
+    
+    return new Promise((resolve, reject) => {
+      const options = {
+        hostname: parsedUrl.hostname,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: method,
+        headers: headers
+      };
+      
+      const req = https.request(options, (res) => {
+        let responseData = '';
+        res.on('data', (chunk) => {
+          responseData += chunk;
+        });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(responseData);
+            if (res.statusCode >= 200 && res.statusCode < 300) {
+              resolve(parsed);
+            } else {
+              reject(new Error(parsed.message || `HTTP error! status: ${res.statusCode}`));
+            }
+          } catch (e) {
+            reject(new Error(`Failed to parse response: ${responseData}`));
+          }
+        });
+      });
+      
+      req.on('error', (err) => {
+        reject(err);
+      });
+      
+      if (body) {
+        req.write(JSON.stringify(body));
+      }
+      req.end();
+    });
+  }
+};
+
+// Resend HTTP API sending helper
+const sendViaResend = async ({ from, to, subject, html, text, attachments }) => {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    throw new Error('RESEND_API_KEY is not defined');
+  }
+
+  // Format attachments for Resend API
+  const resendAttachments = attachments ? attachments.map(att => {
+    let base64Content = '';
+    if (Buffer.isBuffer(att.content)) {
+      base64Content = att.content.toString('base64');
+    } else if (typeof att.content === 'string') {
+      base64Content = Buffer.from(att.content).toString('base64');
+    }
+    return {
+      filename: att.filename,
+      content: base64Content
+    };
+  }) : [];
+
+  const payload = {
+    from,
+    to: Array.isArray(to) ? to : [to],
+    subject,
+    html,
+    text,
+    attachments: resendAttachments
+  };
+
+  const responseData = await makeRequest('https://api.resend.com/emails', 'POST', {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`
+  }, payload);
+
+  return {
+    messageId: responseData.id,
+    ...responseData
+  };
+};
+
+// Email service configuration (SMTP fallback)
 const createTransporter = () => {
   return nodemailer.createTransport({
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
@@ -357,9 +458,10 @@ const wrapInEmailTemplate = (body, companyName) => {
 // Send quote email
 const sendQuoteEmail = async (quoteData, customerEmail) => {
   try {
-    const transporter = createTransporter();
-    
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    const hasResend = !!process.env.RESEND_API_KEY;
+    const hasSmtp = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+
+    if (!hasResend && !hasSmtp) {
       console.warn('Email credentials not configured. Skipping email send.');
       return { success: false, message: 'Email service not configured' };
     }
@@ -383,8 +485,15 @@ const sendQuoteEmail = async (quoteData, customerEmail) => {
     console.log('Generating quote PDF attachment...');
     const pdfResult = await generateQuotePDF(quoteData, quoteData.company, quoteData.customer);
     
+    // Determine 'from' address
+    let fromEmail = process.env.EMAIL_USER;
+    if (hasResend && (!fromEmail || fromEmail.includes('@gmail.com') || fromEmail.includes('@yahoo.com') || fromEmail.includes('@outlook.com') || fromEmail.includes('@hotmail.com'))) {
+      console.warn(`Resend requires a verified domain. Falling back from '${fromEmail}' to 'onboarding@resend.dev' for sandbox sending.`);
+      fromEmail = 'onboarding@resend.dev';
+    }
+
     const mailOptions = {
-      from: `"${quoteData.company.name}" <${process.env.EMAIL_USER}>`,
+      from: `"${quoteData.company.name}" <${fromEmail}>`,
       to: customerEmail,
       subject: subject,
       html: html,
@@ -398,8 +507,17 @@ const sendQuoteEmail = async (quoteData, customerEmail) => {
       ]
     };
     
-    const result = await transporter.sendMail(mailOptions);
-    console.log('Quote email sent successfully:', result.messageId);
+    let result;
+    if (hasResend) {
+      console.log('Sending quote email via Resend API...');
+      result = await sendViaResend(mailOptions);
+      console.log('Quote email sent successfully via Resend:', result.messageId);
+    } else {
+      console.log('Sending quote email via SMTP...');
+      const transporter = createTransporter();
+      result = await transporter.sendMail(mailOptions);
+      console.log('Quote email sent successfully via SMTP:', result.messageId);
+    }
     
     return {
       success: true,
@@ -419,9 +537,10 @@ const sendQuoteEmail = async (quoteData, customerEmail) => {
 // Send invoice email
 const sendInvoiceEmail = async (invoiceData, customerEmail) => {
   try {
-    const transporter = createTransporter();
-    
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    const hasResend = !!process.env.RESEND_API_KEY;
+    const hasSmtp = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+
+    if (!hasResend && !hasSmtp) {
       console.warn('Email credentials not configured. Skipping email send.');
       return { success: false, message: 'Email service not configured' };
     }
@@ -450,8 +569,15 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
     const attachmentFilename = pdfResult.isHtml ? pdfResult.filename : `invoice-${invoiceData.invoiceNumber}.pdf`;
     const attachmentContentType = pdfResult.isHtml ? 'text/html' : 'application/pdf';
 
+    // Determine 'from' address
+    let fromEmail = process.env.EMAIL_USER;
+    if (hasResend && (!fromEmail || fromEmail.includes('@gmail.com') || fromEmail.includes('@yahoo.com') || fromEmail.includes('@outlook.com') || fromEmail.includes('@hotmail.com'))) {
+      console.warn(`Resend requires a verified domain. Falling back from '${fromEmail}' to 'onboarding@resend.dev' for sandbox sending.`);
+      fromEmail = 'onboarding@resend.dev';
+    }
+
     const mailOptions = {
-      from: `"${invoiceData.company.name}" <${process.env.EMAIL_USER}>`,
+      from: `"${invoiceData.company.name}" <${fromEmail}>`,
       to: customerEmail,
       subject: subject,
       html: html,
@@ -465,8 +591,17 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
       ]
     };
     
-    const result = await transporter.sendMail(mailOptions);
-    console.log('Invoice email sent successfully:', result.messageId);
+    let result;
+    if (hasResend) {
+      console.log('Sending invoice email via Resend API...');
+      result = await sendViaResend(mailOptions);
+      console.log('Invoice email sent successfully via Resend:', result.messageId);
+    } else {
+      console.log('Sending invoice email via SMTP...');
+      const transporter = createTransporter();
+      result = await transporter.sendMail(mailOptions);
+      console.log('Invoice email sent successfully via SMTP:', result.messageId);
+    }
     
     return {
       success: true,
@@ -486,15 +621,26 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
 // Test email configuration
 const testEmailConfiguration = async () => {
   try {
-    const transporter = createTransporter();
-    
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    const hasResend = !!process.env.RESEND_API_KEY;
+    const hasSmtp = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
+
+    if (!hasResend && !hasSmtp) {
       return { success: false, message: 'Email credentials not configured' };
     }
-    
-    await transporter.verify();
-    console.log('Email configuration is valid');
-    return { success: true, message: 'Email configuration is valid' };
+
+    if (hasResend) {
+      console.log('Testing Resend configuration...');
+      await makeRequest('https://api.resend.com/domains', 'GET', {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`
+      });
+      console.log('Resend API key is valid');
+      return { success: true, message: 'Resend API configuration is valid' };
+    } else {
+      const transporter = createTransporter();
+      await transporter.verify();
+      console.log('Email configuration is valid');
+      return { success: true, message: 'Email configuration is valid' };
+    }
   } catch (error) {
     console.error('Email configuration test failed:', error);
     return { success: false, error: error.message, message: 'Email configuration test failed' };
