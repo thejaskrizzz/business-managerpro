@@ -30,7 +30,8 @@ router.post('/register', async (req, res) => {
         dateFormat: 'MM/DD/YYYY',
         quotePrefix: 'Q',
         quoteNumber: 1,
-        taxRate: 0
+        taxRate: 0,
+        emailServiceType: 'smtp'
       }
     });
 

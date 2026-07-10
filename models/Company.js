@@ -169,6 +169,11 @@ const companySchema = new mongoose.Schema({
     invoiceEmailBody: {
       type: String,
       default: 'Dear {{customerName}},\n\nPlease find attached the invoice {{invoiceNumber}} for your review.\n\nTotal: {{totalAmount}}\nAmount Paid: {{paidAmount}}\nBalance Due: {{balanceDue}}\n\nThank you for your business!'
+    },
+    emailServiceType: {
+      type: String,
+      default: 'smtp',
+      enum: ['smtp', 'resend']
     }
   },
   isActive: {

@@ -485,9 +485,20 @@ const sendQuoteEmail = async (quoteData, customerEmail) => {
     console.log('Generating quote PDF attachment...');
     const pdfResult = await generateQuotePDF(quoteData, quoteData.company, quoteData.customer);
     
+    // Choose delivery mechanism with fallbacks
+    const emailServiceType = settings.emailServiceType || 'smtp';
+    let useResend = false;
+    if (emailServiceType === 'resend' && hasResend) {
+      useResend = true;
+    } else if (emailServiceType === 'smtp' && hasSmtp) {
+      useResend = false;
+    } else {
+      useResend = hasResend;
+    }
+
     // Determine 'from' address
     let fromEmail = process.env.EMAIL_USER;
-    if (hasResend && (!fromEmail || fromEmail.includes('@gmail.com') || fromEmail.includes('@yahoo.com') || fromEmail.includes('@outlook.com') || fromEmail.includes('@hotmail.com'))) {
+    if (useResend && (!fromEmail || fromEmail.includes('@gmail.com') || fromEmail.includes('@yahoo.com') || fromEmail.includes('@outlook.com') || fromEmail.includes('@hotmail.com'))) {
       console.warn(`Resend requires a verified domain. Falling back from '${fromEmail}' to 'onboarding@resend.dev' for sandbox sending.`);
       fromEmail = 'onboarding@resend.dev';
     }
@@ -508,7 +519,7 @@ const sendQuoteEmail = async (quoteData, customerEmail) => {
     };
     
     let result;
-    if (hasResend) {
+    if (useResend) {
       console.log('Sending quote email via Resend API...');
       result = await sendViaResend(mailOptions);
       console.log('Quote email sent successfully via Resend:', result.messageId);
@@ -569,9 +580,20 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
     const attachmentFilename = pdfResult.isHtml ? pdfResult.filename : `invoice-${invoiceData.invoiceNumber}.pdf`;
     const attachmentContentType = pdfResult.isHtml ? 'text/html' : 'application/pdf';
 
+    // Choose delivery mechanism with fallbacks
+    const emailServiceType = settings.emailServiceType || 'smtp';
+    let useResend = false;
+    if (emailServiceType === 'resend' && hasResend) {
+      useResend = true;
+    } else if (emailServiceType === 'smtp' && hasSmtp) {
+      useResend = false;
+    } else {
+      useResend = hasResend;
+    }
+
     // Determine 'from' address
     let fromEmail = process.env.EMAIL_USER;
-    if (hasResend && (!fromEmail || fromEmail.includes('@gmail.com') || fromEmail.includes('@yahoo.com') || fromEmail.includes('@outlook.com') || fromEmail.includes('@hotmail.com'))) {
+    if (useResend && (!fromEmail || fromEmail.includes('@gmail.com') || fromEmail.includes('@yahoo.com') || fromEmail.includes('@outlook.com') || fromEmail.includes('@hotmail.com'))) {
       console.warn(`Resend requires a verified domain. Falling back from '${fromEmail}' to 'onboarding@resend.dev' for sandbox sending.`);
       fromEmail = 'onboarding@resend.dev';
     }
@@ -592,7 +614,7 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
     };
     
     let result;
-    if (hasResend) {
+    if (useResend) {
       console.log('Sending invoice email via Resend API...');
       result = await sendViaResend(mailOptions);
       console.log('Invoice email sent successfully via Resend:', result.messageId);
@@ -619,7 +641,7 @@ const sendInvoiceEmail = async (invoiceData, customerEmail) => {
 };
 
 // Test email configuration
-const testEmailConfiguration = async () => {
+const testEmailConfiguration = async (companySettings = {}) => {
   try {
     const hasResend = !!process.env.RESEND_API_KEY;
     const hasSmtp = !!(process.env.EMAIL_USER && process.env.EMAIL_PASS);
@@ -628,7 +650,17 @@ const testEmailConfiguration = async () => {
       return { success: false, message: 'Email credentials not configured' };
     }
 
-    if (hasResend) {
+    const emailServiceType = companySettings.emailServiceType || 'smtp';
+    let useResend = false;
+    if (emailServiceType === 'resend' && hasResend) {
+      useResend = true;
+    } else if (emailServiceType === 'smtp' && hasSmtp) {
+      useResend = false;
+    } else {
+      useResend = hasResend;
+    }
+
+    if (useResend) {
       console.log('Testing Resend configuration...');
       await makeRequest('https://api.resend.com/domains', 'GET', {
         'Authorization': `Bearer ${process.env.RESEND_API_KEY}`

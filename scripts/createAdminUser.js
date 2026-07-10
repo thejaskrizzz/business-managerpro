@@ -31,7 +31,8 @@ async function createAdminUser() {
           creditNotePrefix: 'CN',
           nextCreditNoteNumber: 1,
           creditNoteExpiryEnabled: false,
-          creditNoteExpiryDays: 365
+          creditNoteExpiryDays: 365,
+          emailServiceType: 'smtp'
         }
       });
       await company.save();
