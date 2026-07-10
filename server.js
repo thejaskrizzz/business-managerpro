@@ -29,6 +29,7 @@ app.use(cors({
     'http://localhost:3000',
     'https://crm.royalservehotelsupplies.ae',
     'https://business-manager-pro.onrender.com',
+    'https://api.royalservehotelsupplies.ae',
     'https://royalbusinessappuae.vercel.app',
     process.env.FRONTEND_URL
   ].filter(Boolean), // Remove any undefined values
