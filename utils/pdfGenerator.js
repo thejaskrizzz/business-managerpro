@@ -98,25 +98,56 @@ const ensureUploadsDir = () => {
 
 // Helper function to launch Puppeteer with fallback paths
 const launchPuppeteer = async () => {
+  const launchOptions = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu',
+      '--disable-web-security',
+      '--disable-features=VizDisplayCompositor'
+    ]
+  };
+
   try {
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor'
-      ]
-    });
+    const browser = await puppeteer.launch(launchOptions);
     console.log('Successfully launched Puppeteer');
     return browser;
   } catch (error) {
-    console.error('Failed to launch Puppeteer:', error);
+    console.warn('Failed to launch Puppeteer with default options, attempting system browser paths...');
+    
+    // Check for common Linux system browser paths
+    if (process.platform === 'linux') {
+      const systemPaths = [
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/usr/bin/google-chrome',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/chrome'
+      ];
+      
+      for (const systemPath of systemPaths) {
+        if (fs.existsSync(systemPath)) {
+          try {
+            console.log(`Attempting to launch Puppeteer using system browser: ${systemPath}`);
+            const browser = await puppeteer.launch({
+              ...launchOptions,
+              executablePath: systemPath
+            });
+            console.log(`Successfully launched Puppeteer using system browser: ${systemPath}`);
+            return browser;
+          } catch (launchError) {
+            console.error(`Failed to launch using system browser at ${systemPath}:`, launchError);
+          }
+        }
+      }
+    }
+    
+    console.error('All Puppeteer launch attempts failed:', error);
     throw error;
   }
 };
