@@ -317,12 +317,18 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           .box { background: #f8fafc; padding: 15px; border-radius: 4px; flex: 1; }
           .box h3 { margin: 0 0 10px 0; font-size: 12px; color: #1e40af; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; }
           table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
           th { background: #1e40af; color: white; padding: 8px; text-align: left; font-size: 9px; }
           td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px; }
           .amount-col { text-align: right; }
+          .badge-cn { display: inline-block; padding: 2px 5px; font-size: 8px; font-weight: bold; border-radius: 3px; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+          .badge-inv { display: inline-block; padding: 2px 5px; font-size: 8px; font-weight: bold; border-radius: 3px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
           .total-section { display: flex; justify-content: flex-end; }
-          .total-box { width: 200px; }
-          .total-row { display: flex; justify-content: space-between; padding: 8px; background: #1e40af; color: white; font-weight: bold; }
+          .total-box { width: 280px; border: 1px solid #e2e8f0; border-radius: 4px; overflow: hidden; background: #f8fafc; }
+          .subtotal-row { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 9px; color: #475569; border-bottom: 1px solid #e2e8f0; }
+          .credit-deduct-row { display: flex; justify-content: space-between; padding: 6px 10px; font-size: 9px; color: #059669; font-weight: 600; border-bottom: 1px solid #e2e8f0; background: #ecfdf5; }
+          .total-row { display: flex; justify-content: space-between; padding: 8px 10px; background: #1e40af; color: white; font-weight: bold; font-size: 11px; }
+          .remaining-credit-note { padding: 5px 10px; font-size: 8.5px; color: #059669; background: #f0fdf4; text-align: right; font-style: italic; }
         </style>
       </head>
       <body>
@@ -359,10 +365,11 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
             <thead>
               <tr>
                 <th>Date</th>
-                <th>Invoice No</th>
+                <th>Type</th>
+                <th>Ref No</th>
                 <th>Description</th>
                 <th class="amount-col">Amount</th>
-                <th class="amount-col">Payment</th>
+                <th class="amount-col">Payment / Credit</th>
                 <th class="amount-col">Balance</th>
               </tr>
             </thead>
@@ -370,11 +377,12 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
               ${data.invoices.map(inv => `
                 <tr>
                   <td>${formatDate(inv.invoiceDate)}</td>
-                  <td>${inv.invoiceNumber}</td>
+                  <td>${inv.type === 'credit_note' ? '<span class="badge-cn">Credit Note</span>' : '<span class="badge-inv">Invoice</span>'}</td>
+                  <td><strong>${inv.invoiceNumber}</strong></td>
                   <td>${inv.description}</td>
-                  <td class="amount-col">${formatCurrency(inv.amount)}</td>
-                  <td class="amount-col">${formatCurrency(inv.payment)}</td>
-                  <td class="amount-col">${formatCurrency(inv.runningBalance)}</td>
+                  <td class="amount-col">${inv.type === 'credit_note' ? '-' : ''}${formatCurrency(Math.abs(inv.amount || 0))}</td>
+                  <td class="amount-col">${formatCurrency(inv.payment || 0)}</td>
+                  <td class="amount-col"><strong>${formatCurrency(inv.runningBalance || 0)}</strong></td>
                 </tr>
               `).join('')}
             </tbody>
@@ -382,10 +390,31 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
 
           <div class="total-section">
             <div class="total-box">
-              <div class="total-row">
-                <span>Total Outstanding Balance</span>
-                <span>${formatCurrency(data.totalBalance)}</span>
+              <div class="subtotal-row">
+                <span>Total Invoiced</span>
+                <span>${formatCurrency(data.totalInvoiced !== undefined ? data.totalInvoiced : data.totalBalance)}</span>
               </div>
+              ${(data.totalPaidCash > 0 || data.totalCreditApplied > 0 || data.totalPayments > 0) ? `
+                <div class="subtotal-row">
+                  <span>Payments / Credits Applied</span>
+                  <span>-${formatCurrency(data.totalPaidAndApplied || data.totalPayments || 0)}</span>
+                </div>
+              ` : ''}
+              ${(data.creditDeducted > 0) ? `
+                <div class="credit-deduct-row">
+                  <span>Less: Available Credit Notes</span>
+                  <span>-${formatCurrency(data.creditDeducted)}</span>
+                </div>
+              ` : ''}
+              <div class="total-row">
+                <span>Net Outstanding Balance</span>
+                <span>${formatCurrency(data.netBalanceDue !== undefined ? data.netBalanceDue : data.totalBalance)}</span>
+              </div>
+              ${(data.remainingCreditAfterSOA > 0) ? `
+                <div class="remaining-credit-note">
+                  Remaining Wallet Credit: ${formatCurrency(data.remainingCreditAfterSOA)}
+                </div>
+              ` : ''}
             </div>
           </div>
         </div>

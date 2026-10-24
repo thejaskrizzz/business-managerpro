@@ -3,15 +3,16 @@ const router = express.Router();
 const Invoice = require('../models/Invoice');
 const Company = require('../models/Company');
 const Customer = require('../models/Customer');
-const { authenticateToken } = require('../middleware/auth');
+const CreditNote = require('../models/CreditNote');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 const { generateSOAPDF } = require('../utils/pdfGenerator');
 
 // @route   GET /api/soa
-// @desc    Get Statement of Account for a customer
+// @desc    Get Statement of Account for a customer with credit note support
 // @access  Private
 router.get('/', authenticateToken, async (req, res) => {
     try {
-        const { customer_id, from, to } = req.query;
+        const { customer_id, from, to, deduct_credit } = req.query;
 
         if (!customer_id || !from || !to) {
             return res.status(400).json({ message: 'Missing required parameters: customer_id, from, to' });
@@ -29,113 +30,190 @@ router.get('/', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid date format' });
         }
 
-        // Build query
-        const query = {
+        const companyId = req.user?.company?._id;
+
+        // Build query for Invoices in date range
+        const invoiceQuery = {
             customer: customer_id,
-            invoiceNumber: { $exists: true, $ne: null }, // Ensure existing invoices
+            invoiceNumber: { $exists: true, $ne: null },
             status: { $ne: 'cancelled' },
-            createdAt: { $gte: fromDate, $lte: toDate } // Filter by date range. 
-            // Note: User requirements say "invoice.date". 
-            // Checking Invoice model... it has 'createdAt' and 'dueDate'. 
-            // It doesn't seem to have a specific 'invoiceDate' field in the schema I read earlier?
-            // Let me re-verify the Invoice model. 
-            // Wait, looking at Invoice.js from previous turn...
-            // It has `dueDate`, `createdAt`, `updatedAt`.
-            // It DOES NOT have an explicit `invoiceDate` field.
-            // Usually `createdAt` is used, or maybe `invoiceDate` was missed in my quick read?
-            // I'll assume `createdAt` for now as the invoice date.
+            createdAt: { $gte: fromDate, $lte: toDate }
         };
+        if (companyId) {
+            invoiceQuery.company = companyId;
+        }
 
-        // Fetch invoices
-        const invoices = await Invoice.find(query)
-            .sort({ createdAt: 1 }) // Ascending order
-            .lean(); // Convert to plain JS objects for better performance
+        // Build query for Credit Notes in date range
+        const cnQuery = {
+            customer: customer_id,
+            creditNoteNumber: { $exists: true, $ne: null },
+            createdAt: { $gte: fromDate, $lte: toDate }
+        };
+        if (companyId) {
+            cnQuery.company = companyId;
+        }
 
-        // Process invoices to calculate running balance
-        // Requirement: Payment column = 0 for now. Balance = Amount.
-        // Show running balance total at bottom.
+        // Build query for all currently available Credit Notes (active credits in customer's account)
+        const activeCnQuery = {
+            customer: customer_id,
+            status: { $in: ['unused', 'partially_used'] },
+            $or: [
+                { expiryDate: null },
+                { expiryDate: { $gt: new Date() } }
+            ]
+        };
+        if (companyId) {
+            activeCnQuery.company = companyId;
+        }
 
-        let runningBalance = 0;
+        // Fetch Invoices, Period Credit Notes, and Total Available Credits concurrently
+        const [invoices, creditNotesInPeriod, availableCreditNotes] = await Promise.all([
+            Invoice.find(invoiceQuery).sort({ createdAt: 1 }).lean(),
+            CreditNote.find(cnQuery).sort({ createdAt: 1 }).lean(),
+            CreditNote.find(activeCnQuery).sort({ createdAt: 1 }).lean()
+        ]);
 
-        const statementItems = invoices.map(invoice => {
-            // Description: combine item names
-            const description = invoice.items
-                ? invoice.items.map(item => item.name).join(', ')
-                : invoice.description || 'Invoice';
+        const totalAvailableCredit = availableCreditNotes.reduce(
+            (sum, cn) => sum + Number(cn.remainingBalance || 0),
+            0
+        );
 
-            // Amount (Grand Total)
-            const amount = invoice.total;
+        // Process invoices
+        const invoiceItems = invoices.map(invoice => {
+            const description = invoice.items && invoice.items.length > 0
+                ? invoice.items.map(item => item.name).filter(Boolean).join(', ')
+                : (invoice.description || invoice.title || 'Invoice');
 
-            // Update running balance
-            runningBalance += amount;
+            const amount = Number(invoice.total || 0);
+            const taxAmount = Number(invoice.taxAmount || 0);
+            const subtotal = Number(invoice.subtotal || (amount - taxAmount));
+            const paidAmount = Number(invoice.paidAmount || 0);
+            const creditApplied = Number(invoice.creditApplied || 0);
+            const payment = paidAmount + creditApplied;
+            const balance = Math.max(0, amount - payment);
 
             return {
                 _id: invoice._id,
+                type: 'invoice',
                 invoiceDate: invoice.createdAt,
                 invoiceNumber: invoice.invoiceNumber,
-                description: description,
-                amount: amount,
-                payment: 0, // Hardcoded as per requirement
-                balance: amount, // Balance for this specific invoice is just the amount? 
-                // "Balance = Amount" might mean "outstanding amount for this invoice" 
-                // OR it might mean "running balance after this line".
-                // Usually SOA shows running balance.
-                // "Show running balance total at bottom" implies the table might just show line items.
-                // But usually the 'Balance' column in SOA is the running balance.
-                // Requirement says: "Balance = Amount". This is ambiguous.
-                // "Show running balance total at bottom" - okay.
-                // If "Balance = Amount", then the column just repeats the Amount?
-                // I will format it as: Amount | Payment | Balance (Running Balance)
-                // Wait, re-reading: "Balance = Amount". 
-                // If I just put Amount in Balance column, it's redundant.
-                // I will interpret "Balance = Amount" as "Outstanding Balance of this invoice".
-                // Since Payment=0, Outstanding = Amount.
-                // But for an SOA, usually you have a running balance column.
-                // I'll return the calculated running balance as well, just in case.
-                // Let's stick to the prompt's explicit "Balance = Amount" for the column logic if strictly followed,
-                // but standard accounting SOA implies running balance.
-                // I'll generate the response structure so frontend can decide.
-                runningBalance: runningBalance // Use this for the 'Balance' column if I decide so, or just for the bottom total.
+                description,
+                subtotal,
+                taxAmount,
+                amount,
+                paidAmount,
+                creditApplied,
+                payment,
+                balance,
+                rawDate: new Date(invoice.createdAt).getTime()
             };
         });
 
-        // Remove duplicates based on invoiceNumber (just in case, though query shouldn't return them if unique in DB)
-        // The requirement "Remove duplicate invoices (same invoice_number must appear once)" suggests there might be data issues?
-        // mongoose 'unique: true' on invoiceNumber should prevent this, but 'sparse: true' allows nulls.
-        // My query filters `invoiceNumber: { $exists: true, $ne: null }`.
-        // I'll assume standard `find` returns unique docs by _id. 
-        // If they mean duplicate invoice NUMBERS across different docs...
-        // I will do a filter in JS to be safe.
+        // Process credit notes issued in the period
+        const creditNoteItems = creditNotesInPeriod.map(cn => {
+            const description = cn.returnReason
+                ? `Credit Note (${cn.returnReason})`
+                : (cn.returnedItems && cn.returnedItems.length > 0
+                    ? `Credit Note - ${cn.returnedItems.map(i => i.productName).filter(Boolean).join(', ')}`
+                    : 'Credit Note / Return');
 
-        const uniqueInvoices = [];
-        const seenInvoiceNumbers = new Set();
+            const creditAmount = Number(cn.creditAmount || 0);
+            const remainingBalance = Number(cn.remainingBalance || 0);
+            const usedAmount = Number(cn.usedAmount || 0);
 
-        let finalRunningBalance = 0;
+            return {
+                _id: cn._id,
+                type: 'credit_note',
+                invoiceDate: cn.createdAt,
+                invoiceNumber: cn.creditNoteNumber,
+                description,
+                subtotal: -(cn.subtotal || creditAmount),
+                taxAmount: -(cn.taxAmount || 0),
+                amount: -creditAmount,
+                paidAmount: 0,
+                creditApplied: usedAmount,
+                payment: creditAmount,
+                balance: remainingBalance,
+                remainingBalance,
+                status: cn.status,
+                rawDate: new Date(cn.createdAt).getTime()
+            };
+        });
 
-        for (const item of statementItems) {
-            if (!seenInvoiceNumbers.has(item.invoiceNumber)) {
-                seenInvoiceNumbers.add(item.invoiceNumber);
+        // Merge invoices and credit notes chronologically
+        const allItems = [...invoiceItems, ...creditNoteItems].sort((a, b) => a.rawDate - b.rawDate);
 
-                // Recalculate running balance strictly on unique items
-                finalRunningBalance += item.amount;
-                item.runningBalance = finalRunningBalance;
+        // Deduplicate by reference number and calculate running balance
+        const uniqueItems = [];
+        const seenRefs = new Set();
+        let runningBalance = 0;
 
-                uniqueInvoices.push(item);
+        for (const item of allItems) {
+            if (!seenRefs.has(item.invoiceNumber)) {
+                seenRefs.add(item.invoiceNumber);
+
+                if (item.type === 'invoice') {
+                    runningBalance += (item.amount - item.payment);
+                } else if (item.type === 'credit_note') {
+                    runningBalance -= (item.remainingBalance !== undefined ? item.remainingBalance : Math.abs(item.amount));
+                }
+                item.runningBalance = Math.max(0, runningBalance);
+                uniqueItems.push(item);
             }
         }
+
+        // Totals
+        const totalInvoiced = invoices.reduce((sum, inv) => sum + Number(inv.total || 0), 0);
+        const totalTax = invoices.reduce((sum, inv) => sum + Number(inv.taxAmount || 0), 0);
+        const totalSubtotal = invoices.reduce((sum, inv) => sum + Number(inv.subtotal || (inv.total - (inv.taxAmount || 0))), 0);
+        const totalPaidCash = invoices.reduce((sum, inv) => sum + Number(inv.paidAmount || 0), 0);
+        const totalCreditApplied = invoices.reduce((sum, inv) => sum + Number(inv.creditApplied || 0), 0);
+        const totalPayments = totalPaidCash + totalCreditApplied;
+        const totalOutstandingInvoices = Math.max(0, totalInvoiced - totalPayments);
+
+        // Determine if credit should be reduced
+        const shouldDeductCredit = deduct_credit !== 'false';
+        const creditDeducted = shouldDeductCredit ? Math.min(totalAvailableCredit, totalOutstandingInvoices) : 0;
+        const netBalanceDue = Math.max(0, totalOutstandingInvoices - creditDeducted);
+        const remainingCreditAfterSOA = Math.max(0, totalAvailableCredit - totalOutstandingInvoices);
+
+        const avgTaxRate = totalSubtotal > 0 ? Math.round((totalTax / totalSubtotal) * 100) : 0;
 
         const statementData = {
             customer_id,
             period: { from, to },
             statementDate: new Date(),
-            invoices: uniqueInvoices,
-            totalBalance: finalRunningBalance
+            invoices: uniqueItems,
+            totalInvoiced,
+            totalTax,
+            totalSubtotal,
+            totalPayments,
+            totalPaidCash,
+            totalCreditApplied,
+            totalPaidAndApplied: totalPayments,
+            totalOutstandingInvoices,
+            availableCreditBalance: totalAvailableCredit,
+            deductCredit: shouldDeductCredit,
+            creditDeducted,
+            netBalanceDue,
+            remainingCreditAfterSOA,
+            totalBalance: netBalanceDue,
+            grandTotal: netBalanceDue,
+            avgTaxRate,
+            availableCreditNotes: availableCreditNotes.map(cn => ({
+                _id: cn._id,
+                creditNoteNumber: cn.creditNoteNumber,
+                creditAmount: cn.creditAmount,
+                usedAmount: cn.usedAmount,
+                remainingBalance: cn.remainingBalance,
+                createdAt: cn.createdAt,
+                status: cn.status
+            }))
         };
 
         // Check for PDF format
         if (req.query.format === 'pdf') {
-            // Fetch Company and Customer details for PDF
-            const company = await Company.findById(req.user.company._id);
+            const company = await Company.findById(companyId);
             const customer = await Customer.findById(customer_id);
 
             const pdfResult = await generateSOAPDF(statementData, company, customer);
@@ -159,4 +237,135 @@ router.get('/', authenticateToken, async (req, res) => {
     }
 });
 
+// @route   POST /api/soa/apply-credit
+// @desc    Apply customer available credit notes to unpaid invoices (FIFO) and reduce credit notes
+// @access  Private (Admin / Manager)
+router.post('/apply-credit', authenticateToken, requireRole('admin', 'manager'), async (req, res) => {
+    try {
+        const { customer_id, amount } = req.body;
+        if (!customer_id) {
+            return res.status(400).json({ message: 'customer_id is required' });
+        }
+
+        const companyId = req.user?.company?._id;
+
+        // Find available credit notes for this customer (oldest first, FIFO)
+        const now = new Date();
+        const cnQuery = {
+            customer: customer_id,
+            status: { $in: ['unused', 'partially_used'] },
+            $or: [
+                { expiryDate: null },
+                { expiryDate: { $gt: now } }
+            ]
+        };
+        if (companyId) cnQuery.company = companyId;
+
+        const creditNotes = await CreditNote.find(cnQuery).sort({ createdAt: 1 });
+        const totalAvailableCredit = creditNotes.reduce((sum, cn) => sum + Number(cn.remainingBalance || 0), 0);
+
+        if (totalAvailableCredit <= 0.001) {
+            return res.status(400).json({ message: 'No available credit notes found for this customer' });
+        }
+
+        // Find unpaid invoices for this customer (oldest first, FIFO)
+        const invQuery = {
+            customer: customer_id,
+            status: { $ne: 'cancelled' }
+        };
+        if (companyId) invQuery.company = companyId;
+
+        const invoices = await Invoice.find(invQuery).sort({ createdAt: 1 });
+
+        const eligibleInvoices = invoices.filter(inv => {
+            const outstanding = Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0) - Number(inv.creditApplied || 0));
+            return outstanding > 0.001;
+        });
+
+        if (eligibleInvoices.length === 0) {
+            return res.status(400).json({ message: 'Customer has no outstanding unpaid invoices' });
+        }
+
+        const totalUnpaid = eligibleInvoices.reduce((sum, inv) => {
+            return sum + Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0) - Number(inv.creditApplied || 0));
+        }, 0);
+
+        const targetAmount = amount 
+            ? Math.min(Number(amount), totalAvailableCredit, totalUnpaid) 
+            : Math.min(totalAvailableCredit, totalUnpaid);
+
+        if (targetAmount <= 0.001) {
+            return res.status(400).json({ message: 'Invalid or zero credit amount to apply' });
+        }
+
+        let remainingToApply = targetAmount;
+        let cnIndex = 0;
+        const appliedRedemptions = [];
+
+        for (const inv of eligibleInvoices) {
+            if (remainingToApply <= 0.001) break;
+
+            const invOutstanding = Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0) - Number(inv.creditApplied || 0));
+            let invNeeded = Math.min(remainingToApply, invOutstanding);
+
+            while (invNeeded > 0.001 && cnIndex < creditNotes.length) {
+                const currentCN = creditNotes[cnIndex];
+                if (currentCN.remainingBalance <= 0.001) {
+                    cnIndex++;
+                    continue;
+                }
+
+                const deduction = Math.min(invNeeded, currentCN.remainingBalance);
+
+                // Update Credit Note
+                currentCN.redemptions.push({
+                    invoice: inv._id,
+                    amount: deduction,
+                    date: new Date(),
+                    notes: `Applied to invoice ${inv.invoiceNumber} via Statement of Account`
+                });
+                currentCN.usedAmount = (currentCN.usedAmount || 0) + deduction;
+                await currentCN.save(); // triggers pre-save recalc of remainingBalance & status
+
+                // Update Invoice
+                if (!inv.creditNoteRedemptions) inv.creditNoteRedemptions = [];
+                inv.creditNoteRedemptions.push({
+                    creditNote: currentCN._id,
+                    amount: deduction
+                });
+                inv.creditApplied = (inv.creditApplied || 0) + deduction;
+                inv.finalPayable = Math.max(0, (inv.total || 0) - inv.creditApplied);
+
+                if ((inv.paidAmount || 0) + inv.creditApplied >= (inv.total || 0) - 0.001) {
+                    inv.status = 'paid';
+                }
+
+                appliedRedemptions.push({
+                    invoiceNumber: inv.invoiceNumber,
+                    creditNoteNumber: currentCN.creditNoteNumber,
+                    amount: deduction
+                });
+
+                invNeeded -= deduction;
+                remainingToApply -= deduction;
+            }
+
+            await inv.save();
+        }
+
+        const totalApplied = targetAmount - remainingToApply;
+
+        res.json({
+            message: `Successfully applied ${totalApplied.toFixed(2)} credit to customer invoices`,
+            totalApplied,
+            appliedRedemptions
+        });
+
+    } catch (err) {
+        console.error('Error applying credit via SOA:', err);
+        res.status(500).json({ message: 'Server error applying credit to invoices' });
+    }
+});
+
 module.exports = router;
+

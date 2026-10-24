@@ -478,6 +478,25 @@ router.post('/redeem-for-invoice', authenticateToken, requireRole('admin', 'mana
       remaining -= deduction;
     }
 
+    if (invoiceId && redemptions.length > 0) {
+      const inv = await Invoice.findById(invoiceId);
+      if (inv) {
+        if (!inv.creditNoteRedemptions) inv.creditNoteRedemptions = [];
+        for (const r of redemptions) {
+          inv.creditNoteRedemptions.push({
+            creditNote: r.creditNote,
+            amount: r.amount
+          });
+        }
+        inv.creditApplied = (inv.creditApplied || 0) + (amount - remaining);
+        inv.finalPayable = Math.max(0, (inv.total || 0) - inv.creditApplied);
+        if ((inv.paidAmount || 0) + inv.creditApplied >= (inv.total || 0) - 0.001) {
+          inv.status = 'paid';
+        }
+        await inv.save();
+      }
+    }
+
     res.json({
       message: 'Credit redeemed successfully',
       totalRedeemed: amount - remaining,
