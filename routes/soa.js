@@ -213,19 +213,26 @@ router.get('/', authenticateToken, async (req, res) => {
 
         // Check for PDF format
         if (req.query.format === 'pdf') {
-            const company = await Company.findById(companyId);
+            let company = null;
+            if (req.user?.company && req.user.company.name) {
+                company = req.user.company;
+            } else if (companyId) {
+                company = await Company.findById(companyId);
+            }
             const customer = await Customer.findById(customer_id);
 
             const pdfResult = await generateSOAPDF(statementData, company, customer);
 
-            if (pdfResult.isHtml) {
-                res.setHeader('Content-Type', 'text/html');
-                res.setHeader('Content-Disposition', `attachment; filename="${pdfResult.filename}"`);
+            if (pdfResult && pdfResult.isHtml) {
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                res.setHeader('Content-Disposition', `attachment; filename="${pdfResult.filename || 'SOA.html'}"`);
                 return res.send(pdfResult.buffer);
             } else {
                 res.setHeader('Content-Type', 'application/pdf');
-                res.setHeader('Content-Disposition', `attachment; filename="${pdfResult.filename}"`);
-                return res.send(pdfResult.buffer);
+                const filename = (pdfResult && pdfResult.filename) || `SOA-${customer ? customer.firstName : 'Customer'}-${to}.pdf`;
+                res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+                const outBuffer = Buffer.isBuffer(pdfResult) ? pdfResult : (pdfResult && pdfResult.buffer ? pdfResult.buffer : Buffer.from(pdfResult || ''));
+                return res.send(outBuffer);
             }
         }
 

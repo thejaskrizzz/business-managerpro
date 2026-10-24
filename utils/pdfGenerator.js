@@ -217,67 +217,62 @@ const generateQuotePDF = async (quote, company, customer) => {
 // Generate SOA PDF
 const generateSOAPDF = async (statementData, company, customer) => {
   try {
+    const comp = company || {};
+    const cust = customer || {};
+
     // Get logo as base64 if available
-    const logoBase64 = company && company.logo ? await getLogoBase64(company.logo) : null;
+    const logoBase64 = comp.logo ? await getLogoBase64(comp.logo) : null;
 
     // Generate HTML content
-    const htmlContent = await generateSOAHTML(statementData, company, customer, logoBase64);
+    const htmlContent = await generateSOAHTML(statementData, comp, cust, logoBase64);
 
     console.log('Starting PDF generation for SOA using html-pdf-node');
 
-    // Use html-pdf-node as primary (consistent with rest of file)
     const options = {
       format: 'A4',
-      margin: { top: '15mm', right: '10mm', bottom: '15mm', left: '10mm' },
+      margin: {
+        top: '10mm',
+        right: '10mm',
+        bottom: '10mm',
+        left: '10mm'
+      },
       printBackground: true,
       displayHeaderFooter: false,
-      preferCSSPageSize: false,
-      timeout: 60000,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor',
-        '--disable-extensions',
-        '--disable-plugins'
-      ]
+      preferCSSPageSize: true
     };
 
     const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
 
-    return {
-      buffer: pdfBuffer,
-      filename: `SOA-${customer ? customer.firstName : 'Customer'}-${statementData.period.to}.pdf`,
-      isHtml: false
-    };
+    return pdfBuffer;
   } catch (error) {
     console.error('PDF generation error (html-pdf-node), trying Puppeteer fallback:', error.message);
     // Fallback to Puppeteer
     let browser;
     try {
-      const htmlContent = await generateSOAHTML(statementData, company, customer, null);
+      const comp = company || {};
+      const cust = customer || {};
+      const logoBase64 = comp.logo ? await getLogoBase64(comp.logo) : null;
+      const htmlContent = await generateSOAHTML(statementData, comp, cust, logoBase64);
       browser = await launchPuppeteer();
       const page = await browser.newPage();
       await page.setContent(htmlContent, { waitUntil: 'networkidle0', timeout: 30000 });
       const pdfBuffer = await page.pdf({
         format: 'A4',
         printBackground: true,
-        margin: { top: '15mm', right: '10mm', bottom: '15mm', left: '10mm' }
+        margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' },
+        preferCSSPageSize: true,
+        displayHeaderFooter: false
       });
-      return {
-        buffer: pdfBuffer,
-        filename: `SOA-${customer ? customer.firstName : 'Customer'}-${statementData.period.to}.pdf`,
-        isHtml: false
-      };
+      return pdfBuffer;
     } catch (puppeteerError) {
       console.error('Puppeteer fallback also failed:', puppeteerError.message);
       // Last resort: return HTML
-      const fallbackHtml = await generateSOAHTML(statementData, company, customer, null);
+      const comp = company || {};
+      const cust = customer || {};
+      const fallbackHtml = await generateSOAHTML(statementData, comp, cust, null);
       return {
-        buffer: Buffer.from(fallbackHtml),
-        filename: `SOA-${customer ? customer.firstName : 'Customer'}.html`,
+        buffer: Buffer.from(fallbackHtml, 'utf8'),
+        filename: `SOA-${cust.firstName || 'Customer'}-${statementData.period.to}.html`,
         isHtml: true
       };
     } finally {
@@ -290,14 +285,23 @@ const generateSOAPDF = async (statementData, company, customer) => {
 
 // Generate HTML for SOA
 const generateSOAHTML = async (data, company, customer, logoBase64) => {
+  const comp = company || {};
+  const cust = customer || {};
+  const settings = comp.settings || {};
+
   const formatCurrency = (amount) => {
-    const currency = company.settings?.currency || 'AED';
+    const currency = settings.currency || 'AED';
     const locale = currency === 'AED' ? 'ar-AE' : 'en-US';
-    return new Intl.NumberFormat(locale, { style: 'currency', currency: currency }).format(amount);
+    return new Intl.NumberFormat(locale, { style: 'currency', currency: currency }).format(amount || 0);
   };
 
   const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-GB'); // DD/MM/YYYY
+    if (!dateString) return '';
+    try {
+      return new Date(dateString).toLocaleDateString('en-GB'); // DD/MM/YYYY
+    } catch {
+      return String(dateString);
+    }
   };
 
   return `
@@ -307,7 +311,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
         <meta charset="UTF-8">
         <title>Statement of Account</title>
         <style>
-          body { font-family: 'Inter', sans-serif; font-size: 10px; color: #1a1a1a; }
+          body { font-family: 'Inter', sans-serif; font-size: 10px; color: #1a1a1a; margin: 0; padding: 0; }
           .container { padding: 20px; }
           .header { display: flex; justify-content: space-between; margin-bottom: 30px; border-bottom: 2px solid #1e40af; padding-bottom: 10px; }
           .company-info h1 { margin: 0; font-size: 18px; color: #1e40af; }
@@ -316,7 +320,6 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           .info-grid { display: flex; justify-content: space-between; margin-bottom: 30px; gap: 20px; }
           .box { background: #f8fafc; padding: 15px; border-radius: 4px; flex: 1; }
           .box h3 { margin: 0 0 10px 0; font-size: 12px; color: #1e40af; border-bottom: 1px solid #e2e8f0; padding-bottom: 5px; }
-          table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
           table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
           th { background: #1e40af; color: white; padding: 8px; text-align: left; font-size: 9px; }
           td { padding: 8px; border-bottom: 1px solid #e2e8f0; font-size: 9px; }
@@ -336,9 +339,9 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           <div class="header">
             <div class="company-info">
               ${logoBase64 ? `<img src="data:image/png;base64,${logoBase64}" style="height: 40px; margin-bottom: 10px;">` : ''}
-              <h1>${company.name}</h1>
-              <p>${company.address?.street || ''}, ${company.address?.city || ''}</p>
-              <p>${company.email || ''} | ${company.phone || ''}</p>
+              <h1>${comp.name || 'Company'}</h1>
+              <p>${comp.address?.street || ''}, ${comp.address?.city || ''}</p>
+              <p>${comp.email || ''} | ${comp.phone || ''}</p>
             </div>
             <div class="statement-title">
               <h2>Statement of Account</h2>
@@ -349,10 +352,10 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           <div class="info-grid">
             <div class="box">
               <h3>Customer Details</h3>
-              <strong>${customer.firstName} ${customer.lastName}</strong><br>
-              ${customer.companyName ? customer.companyName + '<br>' : ''}
-              ${customer.address?.street || ''}<br>
-              ${customer.address?.city || ''}
+              <strong>${cust.firstName || 'Customer'} ${cust.lastName || ''}</strong><br>
+              ${cust.companyName ? cust.companyName + '<br>' : ''}
+              ${cust.address?.street || ''}<br>
+              ${cust.address?.city || ''}
             </div>
             <div class="box">
               <h3>Statement Period</h3>
@@ -374,7 +377,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
               </tr>
             </thead>
             <tbody>
-              ${data.invoices.map(inv => `
+              ${data.invoices && data.invoices.length > 0 ? data.invoices.map(inv => `
                 <tr>
                   <td>${formatDate(inv.invoiceDate)}</td>
                   <td>${inv.type === 'credit_note' ? '<span class="badge-cn">Credit Note</span>' : '<span class="badge-inv">Invoice</span>'}</td>
@@ -384,7 +387,11 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                   <td class="amount-col">${formatCurrency(inv.payment || 0)}</td>
                   <td class="amount-col"><strong>${formatCurrency(inv.runningBalance || 0)}</strong></td>
                 </tr>
-              `).join('')}
+              `).join('') : `
+                <tr>
+                  <td colspan="7" style="text-align:center;padding:15px;color:#64748b;">No transactions found for this period.</td>
+                </tr>
+              `}
             </tbody>
           </table>
 
