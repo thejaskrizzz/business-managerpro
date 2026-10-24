@@ -13,8 +13,9 @@ replica-set database before production rollout.
 
 Settlement updates credit balances, redemption history, and invoice settlement
 fields only. It does not invoke save hooks that recalculate historical item totals,
-taxes, or cash payments. Draft and cancelled invoices are excluded. Allocation is
-FIFO across all issued invoices for the customer, not just the preview period.
+taxes, or cash payments. Numbered invoices are included regardless of their status;
+only cancelled invoices are excluded. Allocation is FIFO across all issued invoices
+for the customer, not just the preview period.
 
 ## PDF runtime
 

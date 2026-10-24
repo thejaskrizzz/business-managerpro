@@ -13,11 +13,11 @@ function load(file, mocks) {
     return module.exports;
 }
 
-function fixture({ invoiceFailure = false, unsupported = false } = {}) {
+function fixture({ invoiceFailure = false, unsupported = false, invoiceStatus = 'sent' } = {}) {
     let state = {
         notes: [{ _id: 'cn1', remainingBalance: 30, usedAmount: 0, creditNoteNumber: 'CN1' },
             { _id: 'cn2', remainingBalance: 50, usedAmount: 0, creditNoteNumber: 'CN2' }],
-        invoices: [{ _id: 'inv1', total: 40, paidAmount: 10, creditApplied: 0, invoiceNumber: 'INV1', status: 'sent' },
+        invoices: [{ _id: 'inv1', total: 40, paidAmount: 10, creditApplied: 0, invoiceNumber: 'INV1', status: invoiceStatus },
             { _id: 'inv2', total: 100, paidAmount: 0, creditApplied: 0, invoiceNumber: 'INV2', status: 'sent' }]
     };
     const original = structuredClone(state);
@@ -32,7 +32,15 @@ function fixture({ invoiceFailure = false, unsupported = false } = {}) {
     const query = value => ({ sort() { return this; }, session(actual) { assert.equal(actual, session); return this; }, async lean() { return structuredClone(value); } });
     function model(key) {
         return {
-            find(filter) { assert.equal(filter.company, 'company'); assert.equal(filter.customer, 'customer'); return query(state[key]); },
+            find(filter) {
+                assert.equal(filter.company, 'company');
+                assert.equal(filter.customer, 'customer');
+                if (key === 'invoices') {
+                    assert.equal(filter.status.$ne, 'cancelled');
+                    assert.equal(filter.status.$nin, undefined);
+                }
+                return query(state[key]);
+            },
             async updateOne(filter, update, options) {
                 assert.equal(options.session, session);
                 if (invoiceFailure && key === 'invoices') throw new Error('Invoice write failed');
@@ -65,6 +73,13 @@ test('FIFO splits credits across issued invoices and preserves invoice totals', 
     assert.equal(f.ended(), true);
 });
 
+test('numbered draft invoices remain eligible for settlement', async () => {
+    const f = fixture({ invoiceStatus: 'draft' });
+    const result = await f.apply(30);
+    assert.equal(result.totalApplied, 30);
+    assert.equal(f.state().invoices[0].status, 'paid');
+});
+
 test('invoice failure aborts transaction and ends session', async () => {
     const f = fixture({ invoiceFailure: true });
     await assert.rejects(f.apply(30), /Invoice write failed/);
@@ -86,16 +101,20 @@ test('reject invalid amounts and excess requests without settlement', async () =
     }
 });
 
-function statementFixture({ deduct = 'false', company = 'company', customer = true, pdf } = {}) {
+function statementFixture({ deduct = 'false', company = 'company', customer = true, pdf, invoiceStatus = 'draft' } = {}) {
     const handlers = {};
     const chain = rows => ({ sort() { return this; }, async lean() { return rows; } });
-    const invoice = { _id: 'i', invoiceNumber: 'INV', createdAt: '2026-10-02', total: 100, subtotal: 100 };
+    const invoice = { _id: 'i', invoiceNumber: 'INV', createdAt: '2026-10-02', total: 100, subtotal: 100, status: invoiceStatus };
     const note = { _id: 'c', creditNoteNumber: 'CN', createdAt: '2026-10-03', creditAmount: 30, remainingBalance: 30 };
     load('routes/soa.js', {
         express: { Router: () => ({ get: (p, ...h) => handlers.get = h.at(-1), post() {} }) },
         mongoose: { isObjectIdOrHexString: () => true }, '../utils/applySoaCredit': {},
         '../middleware/auth': { authenticateToken() {}, requireRole: () => () => {} },
-        '../models/Invoice': { find: () => chain([invoice]) }, '../models/CreditNote': { find: () => chain([note]) },
+        '../models/Invoice': { find: filter => {
+            assert.equal(filter.status.$ne, 'cancelled');
+            assert.equal(filter.status.$nin, undefined);
+            return chain([invoice]);
+        } }, '../models/CreditNote': { find: () => chain([note]) },
         '../models/Customer': { findOne: async filter => { assert.equal(filter.company, 'company'); return customer ? {} : null; } },
         '../models/Company': { findById: async () => ({}) },
         '../utils/pdfGenerator': { generateSOAPDF: async () => pdf }
@@ -111,6 +130,12 @@ test('deduction off preserves wallet; running balance explicitly excludes previe
     assert.equal(body.netBalanceDue, 100);
     assert.equal(body.remainingCreditAfterSOA, 30);
     assert.equal(body.invoices.at(-1).runningBalance, 100);
+});
+
+test('SOA includes numbered invoices whose stored status is draft', async () => {
+    const { body } = await statementFixture({ invoiceStatus: 'draft' });
+    assert.equal(body.totalInvoiced, 100);
+    assert.equal(body.invoices.some(item => item.invoiceNumber === 'INV'), true);
 });
 
 test('deduction on subtracts wallet exactly once', async () => {

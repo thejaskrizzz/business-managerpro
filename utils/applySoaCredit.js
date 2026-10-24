@@ -21,7 +21,7 @@ async function applySoaCredit({ companyId, customerId, amount }) {
                 remainingBalance: { $gt: 0 }, $or: [{ expiryDate: null }, { expiryDate: { $gt: new Date() } }]
             }).sort({ createdAt: 1, _id: 1 }).session(session).lean();
             const invoices = await Invoice.find({ ...scope, invoiceNumber: { $exists: true, $ne: null },
-                status: { $nin: ['cancelled', 'draft'] }
+                status: { $ne: 'cancelled' }
             }).sort({ createdAt: 1, _id: 1 }).session(session).lean();
             const outstanding = inv => Math.max(0, cents(inv.total) - cents(inv.paidAmount) - cents(inv.creditApplied));
             const available = notes.reduce((sum, cn) => sum + cents(cn.remainingBalance), 0);

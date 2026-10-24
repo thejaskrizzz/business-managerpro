@@ -42,7 +42,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const invoiceQuery = {
             customer: customer_id,
             invoiceNumber: { $exists: true, $ne: null },
-            status: { $nin: ['cancelled', 'draft'] },
+            status: { $ne: 'cancelled' },
             createdAt: { $gte: fromDate, $lte: toDate }
         };
         if (companyId) {
