@@ -216,75 +216,30 @@ const generateQuotePDF = async (quote, company, customer) => {
 
 // Generate SOA PDF
 const generateSOAPDF = async (statementData, company, customer) => {
+  let browser;
   try {
     const comp = company || {};
-    const cust = customer || {};
-
-    // Get logo as base64 if available
-    const logoBase64 = comp.logo ? await getLogoBase64(comp.logo) : null;
-
-    // Generate HTML content
-    const htmlContent = await generateSOAHTML(statementData, comp, cust, logoBase64);
-
-    console.log('Starting PDF generation for SOA using html-pdf-node');
-
-    const options = {
-      format: 'A4',
-      margin: {
-        top: '10mm',
-        right: '10mm',
-        bottom: '10mm',
-        left: '10mm'
-      },
-      printBackground: true,
-      displayHeaderFooter: false,
-      preferCSSPageSize: true
-    };
-
-    const pdfBuffer = await htmlPdf.generatePdf({ content: htmlContent }, options);
-
-    return pdfBuffer;
-  } catch (error) {
-    console.error('PDF generation error (html-pdf-node), trying Puppeteer fallback:', error.message);
-    // Fallback to Puppeteer
-    let browser;
-    try {
-      const comp = company || {};
-      const cust = customer || {};
-      const logoBase64 = comp.logo ? await getLogoBase64(comp.logo) : null;
-      const htmlContent = await generateSOAHTML(statementData, comp, cust, logoBase64);
-      browser = await launchPuppeteer();
-      const page = await browser.newPage();
-      await page.setContent(htmlContent, { waitUntil: 'networkidle0', timeout: 30000 });
-      const pdfBuffer = await page.pdf({
-        format: 'A4',
-        printBackground: true,
-        margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' },
-        preferCSSPageSize: true,
-        displayHeaderFooter: false
-      });
-      return pdfBuffer;
-    } catch (puppeteerError) {
-      console.error('Puppeteer fallback also failed:', puppeteerError.message);
-      // Last resort: return HTML
-      const comp = company || {};
-      const cust = customer || {};
-      const fallbackHtml = await generateSOAHTML(statementData, comp, cust, null);
-      return {
-        buffer: Buffer.from(fallbackHtml, 'utf8'),
-        filename: `SOA-${cust.firstName || 'Customer'}-${statementData.period.to}.html`,
-        isHtml: true
-      };
-    } finally {
-      if (browser) {
-        try { await browser.close(); } catch (e) { /* ignore */ }
-      }
-    }
+    const logo = comp.logo ? await getLogoBase64(comp.logo) : null;
+    const html = await generateSOAHTML(statementData, comp, customer || {}, logo);
+    browser = await launchPuppeteer();
+    const page = await browser.newPage();
+    await page.setJavaScriptEnabled(false);
+    await page.setContent(html, { waitUntil: 'load', timeout: 30000 });
+    return Buffer.from(await page.pdf({ format: 'A4', printBackground: true,
+      margin: { top: '10mm', right: '10mm', bottom: '10mm', left: '10mm' }, timeout: 60000 }));
+  } catch (cause) {
+    console.error('SOA PDF generation failed:', cause);
+    const error = new Error('SOA PDF generation unavailable', { cause });
+    error.code = 'PDF_UNAVAILABLE';
+    throw error;
+  } finally {
+    if (browser) await browser.close().catch(error => console.error('Error closing SOA browser:', error));
   }
 };
 
 // Generate HTML for SOA
 const generateSOAHTML = async (data, company, customer, logoBase64) => {
+  const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const comp = company || {};
   const cust = customer || {};
   const settings = comp.settings || {};
@@ -339,9 +294,9 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           <div class="header">
             <div class="company-info">
               ${logoBase64 ? `<img src="data:image/png;base64,${logoBase64}" style="height: 40px; margin-bottom: 10px;">` : ''}
-              <h1>${comp.name || 'Company'}</h1>
-              <p>${comp.address?.street || ''}, ${comp.address?.city || ''}</p>
-              <p>${comp.email || ''} | ${comp.phone || ''}</p>
+              <h1>${escapeHtml(comp.name || 'Company')}</h1>
+              <p>${escapeHtml(comp.address?.street || '')}, ${escapeHtml(comp.address?.city || '')}</p>
+              <p>${escapeHtml(comp.email || '')} | ${escapeHtml(comp.phone || '')}</p>
             </div>
             <div class="statement-title">
               <h2>Statement of Account</h2>
@@ -352,10 +307,10 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
           <div class="info-grid">
             <div class="box">
               <h3>Customer Details</h3>
-              <strong>${cust.firstName || 'Customer'} ${cust.lastName || ''}</strong><br>
-              ${cust.companyName ? cust.companyName + '<br>' : ''}
-              ${cust.address?.street || ''}<br>
-              ${cust.address?.city || ''}
+              <strong>${escapeHtml(cust.firstName || 'Customer')} ${escapeHtml(cust.lastName || '')}</strong><br>
+              ${cust.companyName ? escapeHtml(cust.companyName) + '<br>' : ''}
+              ${escapeHtml(cust.address?.street || '')}<br>
+              ${escapeHtml(cust.address?.city || '')}
             </div>
             <div class="box">
               <h3>Statement Period</h3>
@@ -364,6 +319,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
             </div>
           </div>
 
+          <p>Current balances of issued invoices in this period. Credit note rows are informational; available wallet credit is deducted only in the summary. Preview deductions do not redeem credit.</p>
           <table>
             <thead>
               <tr>
@@ -373,7 +329,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                 <th>Description</th>
                 <th class="amount-col">Amount</th>
                 <th class="amount-col">Payment / Credit</th>
-                <th class="amount-col">Balance</th>
+                <th class="amount-col">Invoice balance before wallet credits</th>
               </tr>
             </thead>
             <tbody>
@@ -381,8 +337,8 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
                 <tr>
                   <td>${formatDate(inv.invoiceDate)}</td>
                   <td>${inv.type === 'credit_note' ? '<span class="badge-cn">Credit Note</span>' : '<span class="badge-inv">Invoice</span>'}</td>
-                  <td><strong>${inv.invoiceNumber}</strong></td>
-                  <td>${inv.description}</td>
+                  <td><strong>${escapeHtml(inv.invoiceNumber)}</strong></td>
+                  <td>${escapeHtml(inv.description)}</td>
                   <td class="amount-col">${inv.type === 'credit_note' ? '-' : ''}${formatCurrency(Math.abs(inv.amount || 0))}</td>
                   <td class="amount-col">${formatCurrency(inv.payment || 0)}</td>
                   <td class="amount-col"><strong>${formatCurrency(inv.runningBalance || 0)}</strong></td>
@@ -419,7 +375,7 @@ const generateSOAHTML = async (data, company, customer, logoBase64) => {
               </div>
               ${(data.remainingCreditAfterSOA > 0) ? `
                 <div class="remaining-credit-note">
-                  Remaining Wallet Credit: ${formatCurrency(data.remainingCreditAfterSOA)}
+                  Credit remaining after preview deduction: ${formatCurrency(data.remainingCreditAfterSOA)}
                 </div>
               ` : ''}
             </div>

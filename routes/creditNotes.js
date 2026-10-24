@@ -181,11 +181,13 @@ router.get('/reports/outstanding', authenticateToken, requireSameCompany, async 
 router.get('/customer/:customerId/balance', authenticateToken, requireSameCompany, async (req, res) => {
   try {
     const customerId = req.params.customerId;
+    if (!mongoose.isObjectIdOrHexString(customerId)) return res.status(400).json({ message: 'Invalid customer ID' });
 
     const creditNotes = await CreditNote.find({
       company: req.user.company._id,
       customer: customerId,
-      status: { $in: ['unused', 'partially_used'] }
+      status: { $in: ['unused', 'partially_used'] },
+      $or: [{ expiryDate: null }, { expiryDate: { $gt: new Date() } }]
     })
       .populate('originalInvoice', 'invoiceNumber')
       .populate('originalSale', 'saleNumber')
@@ -209,7 +211,7 @@ router.get('/customer/:customerId/balance', authenticateToken, requireSameCompan
     ]);
 
     res.json({
-      balance: stats[0] || { totalCredit: 0, totalUsed: 0, remainingBalance: 0 },
+      balance: { ...(stats[0] || { totalCredit: 0, totalUsed: 0 }), remainingBalance: creditNotes.reduce((sum, cn) => sum + Number(cn.remainingBalance || 0), 0) },
       availableCreditNotes: creditNotes
     });
   } catch (error) {

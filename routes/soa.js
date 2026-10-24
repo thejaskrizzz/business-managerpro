@@ -1,4 +1,6 @@
 const express = require('express');
+const mongoose = require('mongoose');
+const { applySoaCredit } = require('../utils/applySoaCredit');
 const router = express.Router();
 const Invoice = require('../models/Invoice');
 const Company = require('../models/Company');
@@ -18,6 +20,10 @@ router.get('/', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Missing required parameters: customer_id, from, to' });
         }
 
+        if (!mongoose.isObjectIdOrHexString(customer_id)) return res.status(400).json({ message: 'Invalid customer ID' });
+        if (!req.user?.company?._id) return res.status(403).json({ message: 'User must belong to a company' });
+        const customer = await Customer.findOne({ _id: customer_id, company: req.user.company._id });
+        if (!customer) return res.status(404).json({ message: 'Customer not found' });
         // Parse dates
         // Using start of day for 'from' and end of day for 'to' to be inclusive
         const fromDate = new Date(from);
@@ -26,7 +32,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const toDate = new Date(to);
         toDate.setHours(23, 59, 59, 999);
 
-        if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+        if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime()) || fromDate > toDate) {
             return res.status(400).json({ message: 'Invalid date format' });
         }
 
@@ -36,7 +42,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const invoiceQuery = {
             customer: customer_id,
             invoiceNumber: { $exists: true, $ne: null },
-            status: { $ne: 'cancelled' },
+            status: { $nin: ['cancelled', 'draft'] },
             createdAt: { $gte: fromDate, $lte: toDate }
         };
         if (companyId) {
@@ -143,24 +149,13 @@ router.get('/', authenticateToken, async (req, res) => {
         // Merge invoices and credit notes chronologically
         const allItems = [...invoiceItems, ...creditNoteItems].sort((a, b) => a.rawDate - b.rawDate);
 
-        // Deduplicate by reference number and calculate running balance
-        const uniqueItems = [];
-        const seenRefs = new Set();
+        // Credit notes are informational rows. Available credit is deducted once in
+        // the summary; this column tracks issued invoice debt before wallet credits.
         let runningBalance = 0;
-
-        for (const item of allItems) {
-            if (!seenRefs.has(item.invoiceNumber)) {
-                seenRefs.add(item.invoiceNumber);
-
-                if (item.type === 'invoice') {
-                    runningBalance += (item.amount - item.payment);
-                } else if (item.type === 'credit_note') {
-                    runningBalance -= (item.remainingBalance !== undefined ? item.remainingBalance : Math.abs(item.amount));
-                }
-                item.runningBalance = Math.max(0, runningBalance);
-                uniqueItems.push(item);
-            }
-        }
+        const uniqueItems = allItems.map(item => {
+            if (item.type === 'invoice') runningBalance += item.balance;
+            return { ...item, runningBalance };
+        });
 
         // Totals
         const totalInvoiced = invoices.reduce((sum, inv) => sum + Number(inv.total || 0), 0);
@@ -169,13 +164,13 @@ router.get('/', authenticateToken, async (req, res) => {
         const totalPaidCash = invoices.reduce((sum, inv) => sum + Number(inv.paidAmount || 0), 0);
         const totalCreditApplied = invoices.reduce((sum, inv) => sum + Number(inv.creditApplied || 0), 0);
         const totalPayments = totalPaidCash + totalCreditApplied;
-        const totalOutstandingInvoices = Math.max(0, totalInvoiced - totalPayments);
+        const totalOutstandingInvoices = invoiceItems.reduce((sum, inv) => sum + inv.balance, 0);
 
         // Determine if credit should be reduced
         const shouldDeductCredit = deduct_credit !== 'false';
         const creditDeducted = shouldDeductCredit ? Math.min(totalAvailableCredit, totalOutstandingInvoices) : 0;
         const netBalanceDue = Math.max(0, totalOutstandingInvoices - creditDeducted);
-        const remainingCreditAfterSOA = Math.max(0, totalAvailableCredit - totalOutstandingInvoices);
+        const remainingCreditAfterSOA = Math.max(0, totalAvailableCredit - creditDeducted);
 
         const avgTaxRate = totalSubtotal > 0 ? Math.round((totalTax / totalSubtotal) * 100) : 0;
 
@@ -219,160 +214,40 @@ router.get('/', authenticateToken, async (req, res) => {
             } else if (companyId) {
                 company = await Company.findById(companyId);
             }
-            const customer = await Customer.findById(customer_id);
+
 
             const pdfResult = await generateSOAPDF(statementData, company, customer);
 
-            if (pdfResult && pdfResult.isHtml) {
-                res.setHeader('Content-Type', 'text/html; charset=utf-8');
-                res.setHeader('Content-Disposition', `attachment; filename="${pdfResult.filename || 'SOA.html'}"`);
-                return res.send(pdfResult.buffer);
-            } else {
-                res.setHeader('Content-Type', 'application/pdf');
-                const filename = (pdfResult && pdfResult.filename) || `SOA-${customer ? customer.firstName : 'Customer'}-${to}.pdf`;
-                res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-                const outBuffer = Buffer.isBuffer(pdfResult) ? pdfResult : (pdfResult && pdfResult.buffer ? pdfResult.buffer : Buffer.from(pdfResult || ''));
-                return res.send(outBuffer);
-            }
+            const outBuffer = Buffer.from(pdfResult);
+            if (outBuffer.subarray(0, 5).toString() !== '%PDF-') throw new Error('Invalid PDF output');
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="SOA-${customer_id}-${toDate.toISOString().slice(0, 10)}.pdf"`);
+            return res.send(outBuffer);
         }
-
         res.json(statementData);
-
     } catch (err) {
         console.error('Error generating SOA:', err);
-        res.status(500).json({ message: 'Server error generating Statement of Account' });
+        res.status(err.code === 'PDF_UNAVAILABLE' ? 503 : 500).json({ message: err.code === 'PDF_UNAVAILABLE'
+            ? 'PDF generation is unavailable. Ask the administrator to check the server browser installation.'
+            : 'Server error generating Statement of Account' });
     }
 });
 
-// @route   POST /api/soa/apply-credit
-// @desc    Apply customer available credit notes to unpaid invoices (FIFO) and reduce credit notes
-// @access  Private (Admin / Manager)
 router.post('/apply-credit', authenticateToken, requireRole('admin', 'manager'), async (req, res) => {
     try {
         const { customer_id, amount } = req.body;
-        if (!customer_id) {
-            return res.status(400).json({ message: 'customer_id is required' });
-        }
-
         const companyId = req.user?.company?._id;
-
-        // Find available credit notes for this customer (oldest first, FIFO)
-        const now = new Date();
-        const cnQuery = {
-            customer: customer_id,
-            status: { $in: ['unused', 'partially_used'] },
-            $or: [
-                { expiryDate: null },
-                { expiryDate: { $gt: now } }
-            ]
-        };
-        if (companyId) cnQuery.company = companyId;
-
-        const creditNotes = await CreditNote.find(cnQuery).sort({ createdAt: 1 });
-        const totalAvailableCredit = creditNotes.reduce((sum, cn) => sum + Number(cn.remainingBalance || 0), 0);
-
-        if (totalAvailableCredit <= 0.001) {
-            return res.status(400).json({ message: 'No available credit notes found for this customer' });
-        }
-
-        // Find unpaid invoices for this customer (oldest first, FIFO)
-        const invQuery = {
-            customer: customer_id,
-            status: { $ne: 'cancelled' }
-        };
-        if (companyId) invQuery.company = companyId;
-
-        const invoices = await Invoice.find(invQuery).sort({ createdAt: 1 });
-
-        const eligibleInvoices = invoices.filter(inv => {
-            const outstanding = Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0) - Number(inv.creditApplied || 0));
-            return outstanding > 0.001;
-        });
-
-        if (eligibleInvoices.length === 0) {
-            return res.status(400).json({ message: 'Customer has no outstanding unpaid invoices' });
-        }
-
-        const totalUnpaid = eligibleInvoices.reduce((sum, inv) => {
-            return sum + Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0) - Number(inv.creditApplied || 0));
-        }, 0);
-
-        const targetAmount = amount 
-            ? Math.min(Number(amount), totalAvailableCredit, totalUnpaid) 
-            : Math.min(totalAvailableCredit, totalUnpaid);
-
-        if (targetAmount <= 0.001) {
-            return res.status(400).json({ message: 'Invalid or zero credit amount to apply' });
-        }
-
-        let remainingToApply = targetAmount;
-        let cnIndex = 0;
-        const appliedRedemptions = [];
-
-        for (const inv of eligibleInvoices) {
-            if (remainingToApply <= 0.001) break;
-
-            const invOutstanding = Math.max(0, Number(inv.total || 0) - Number(inv.paidAmount || 0) - Number(inv.creditApplied || 0));
-            let invNeeded = Math.min(remainingToApply, invOutstanding);
-
-            while (invNeeded > 0.001 && cnIndex < creditNotes.length) {
-                const currentCN = creditNotes[cnIndex];
-                if (currentCN.remainingBalance <= 0.001) {
-                    cnIndex++;
-                    continue;
-                }
-
-                const deduction = Math.min(invNeeded, currentCN.remainingBalance);
-
-                // Update Credit Note
-                currentCN.redemptions.push({
-                    invoice: inv._id,
-                    amount: deduction,
-                    date: new Date(),
-                    notes: `Applied to invoice ${inv.invoiceNumber} via Statement of Account`
-                });
-                currentCN.usedAmount = (currentCN.usedAmount || 0) + deduction;
-                await currentCN.save(); // triggers pre-save recalc of remainingBalance & status
-
-                // Update Invoice
-                if (!inv.creditNoteRedemptions) inv.creditNoteRedemptions = [];
-                inv.creditNoteRedemptions.push({
-                    creditNote: currentCN._id,
-                    amount: deduction
-                });
-                inv.creditApplied = (inv.creditApplied || 0) + deduction;
-                inv.finalPayable = Math.max(0, (inv.total || 0) - inv.creditApplied);
-
-                if ((inv.paidAmount || 0) + inv.creditApplied >= (inv.total || 0) - 0.001) {
-                    inv.status = 'paid';
-                }
-
-                appliedRedemptions.push({
-                    invoiceNumber: inv.invoiceNumber,
-                    creditNoteNumber: currentCN.creditNoteNumber,
-                    amount: deduction
-                });
-
-                invNeeded -= deduction;
-                remainingToApply -= deduction;
-            }
-
-            await inv.save();
-        }
-
-        const totalApplied = targetAmount - remainingToApply;
-
-        res.json({
-            message: `Successfully applied ${totalApplied.toFixed(2)} credit to customer invoices`,
-            totalApplied,
-            appliedRedemptions
-        });
-
+        if (!companyId) return res.status(403).json({ message: 'User must belong to a company' });
+        if (!mongoose.isObjectIdOrHexString(customer_id)) return res.status(400).json({ message: 'Invalid customer ID' });
+        const result = await applySoaCredit({ companyId, customerId: customer_id, amount });
+        res.json({ message: `Successfully applied ${result.totalApplied.toFixed(2)} credit to customer invoices`, ...result });
     } catch (err) {
         console.error('Error applying credit via SOA:', err);
-        res.status(500).json({ message: 'Server error applying credit to invoices' });
+        const unsupported = err.code === 20 || err.code === 303;
+        res.status(err.status || (unsupported ? 503 : 500)).json({ message: err.status ? err.message : unsupported
+            ? 'Safe credit settlement requires MongoDB transaction support. Contact the administrator.'
+            : 'Credit settlement could not be confirmed. Refresh balances before trying again.' });
     }
 });
 
 module.exports = router;
-
